@@ -1,0 +1,2 @@
+*.o *.obj *.exe *.out *.so *.a *.dll *.lib *.dylib *.dSYM
+build/ bin/ .vscode/ .idea/ *.swp *.swo *~ .DS_Store Thumbs.db
