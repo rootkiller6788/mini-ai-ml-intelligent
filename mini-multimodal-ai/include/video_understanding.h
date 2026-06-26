@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <math.h>
+#include "clip_contrastive.h"
 
 #ifdef __cplusplus
 extern "C" {

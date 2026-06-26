@@ -31,7 +31,7 @@ void mm_cosine_sim_matrix(const float* img_embs, const float* txt_embs,
 
 float mm_infonce_loss(const float* sim_matrix, int batch_size) {
     float loss = 0.0f;
-    float scale = logf(14.2857f);
+    (void)logf(14.2857f);  /* learnable temperature scale (CLIP default ln(1/0.07)) */
 
     for (int i = 0; i < batch_size; i++) {
         float row_max = sim_matrix[i * batch_size];
@@ -180,7 +180,7 @@ void mm_text_encode(const mm_text_encoder_t* enc, const int* token_ids, int num_
         pooled[d] = sum / (float)seq_len;
     }
 
-    if (enc->final_ln_bias.data == NULL) {
+    if (enc->final_ln_bias.weight == NULL) {
         memcpy(embedding, pooled, (size_t)dim * sizeof(float));
         free(pooled);
         free(x);

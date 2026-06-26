@@ -351,10 +351,10 @@ void sd_target_verify(SD_SpeculativeDecoder* decoder, const int* prefix, int pre
     *num_accepted = sd_rejection_sample(draft_logits, target_logits, vocab,
                                          draft_tokens, decoder->gamma, accepted_tokens,
                                          decoder->temperature);
-    int total = decoder->total_candidates + decoder->gamma;
-    decoder->total_candidates = (total > 0) ? total : 1;
-    decoder->total_accepted += *num_accepted;
-    decoder->draft.acceptance_rate = (float)decoder->total_accepted / (float)decoder->total_candidates;
+    int total = decoder->draft.total_candidates + decoder->gamma;
+    decoder->draft.total_candidates = (total > 0) ? total : 1;
+    decoder->draft.total_accepted += *num_accepted;
+    decoder->draft.acceptance_rate = (float)decoder->draft.total_accepted / (float)decoder->draft.total_candidates;
     decoder->total_time_target_ms += sd_get_time_ms() - start;
     free(draft_logits);
     free(target_logits);

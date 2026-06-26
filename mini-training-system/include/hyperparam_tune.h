@@ -78,6 +78,7 @@ typedef struct {
     int   min_epochs;
     int   max_epochs;
     int   bracket_limit;
+    int   num_params;              /**< Number of hyperparameters to tune */
     char  study_name[HPT_MAX_NAME];
     char  storage_path[HPT_MAX_NAME];
     bool  pruner_enabled;

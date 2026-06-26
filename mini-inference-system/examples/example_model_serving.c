@@ -35,8 +35,6 @@ int main(void) {
                batch[i]->output_data[batch[i]->output_len - 1]);
     }
 
-    ms_split_batch_results(batch, batch_size, NULL);
-
     printf("Throughput: %.1f req/s\n", ms_server_throughput(&server));
     printf("Avg latency: %.2f ms\n", ms_server_avg_latency_ms(&server));
 

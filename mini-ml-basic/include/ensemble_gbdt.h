@@ -94,6 +94,7 @@ typedef struct {
     double  lambda;            /* L2 regularisation             */
     double  gamma;             /* min split loss reduction      */
     double  eta;               /* learning rate                 */
+    double  base_score;        /* initial prediction (mean of y)*/
     size_t  n_estimators;
     size_t  max_depth;
     size_t  n_features;

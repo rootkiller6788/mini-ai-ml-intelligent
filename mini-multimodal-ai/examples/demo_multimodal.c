@@ -76,12 +76,14 @@ static void demo_sd(void) {
     printf("%s\n\n", "============================================================");
 
     printf("  [VAE Module]\n");
+    int vae_blocks = 3;
     mm_vae_t vae;
-    mm_vae_init(&vae, 4, 32, 1);
-    printf("  VAE: latent_dim=%d, base_channels=%d\n", 4, 32);
+    mm_vae_init(&vae, 4, 32, vae_blocks);
+    printf("  VAE: latent_dim=%d, base_channels=%d, blocks=%d\n", 4, 32, vae_blocks);
 
     int img_size = 128;
-    int ls = 16;
+    int vae_scale = 1 << (vae_blocks - 1);  /* N-1 downsamplings */
+    int ls = img_size / vae_scale;
     int n_img = img_size * img_size * 3;
     int n_lat = ls * ls * 4;
 
@@ -135,11 +137,11 @@ static void demo_sd(void) {
 
     printf("\n  [Full Pipeline]\n");
     mm_stable_diffusion_t sd;
-    mm_sd_init(&sd, 256, 4, 32, 1);
-    printf("  SD model: size=%d, latent=%d, timesteps=%d\n", 256, 32, 1000);
+    mm_sd_init(&sd, 256, 4, 32, 4);
+    printf("  SD model: size=%d, latent=%d, timesteps=%d\n", 256, sd.latent_size, 1000);
 
     float* gen = (float*)malloc((size_t)256 * 256 * 3 * sizeof(float));
-    mm_sd_generate(&sd, ctx, 768, 15, MM_SD_SAMPLER_DPM_PP_2M, 256, 256, 3, gen);
+    mm_sd_generate(&sd, ctx, 1, 15, MM_SD_SAMPLER_DPM_PP_2M, 256, 256, 3, gen);
 
     float gen_min = 1e9f, gen_max = -1e9f;
     for (int i = 0; i < 256 * 256 * 3; i++) {

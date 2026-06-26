@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 
 static int ev_cmp_double(const void *a, const void *b) {
     double da = *(const double *)a, db = *(const double *)b;
@@ -204,12 +205,12 @@ void ev_online_collect(EVOnlineMetric *m, double engagement, double ctr,
 
 void ev_ab_experiment_compare(const EVOnlineMetric *ctrl,
                               const EVOnlineMetric *treat,
-                              EVABExperiment *exp) {
-    exp->control = *ctrl;
-    exp->treatment = *treat;
+                              EVABExperiment *result) {
+    result->control = *ctrl;
+    result->treatment = *treat;
     double diff = fabs(treat->engagement_rate - ctrl->engagement_rate);
-    exp->p_value = exp(-diff * 10.0);
-    exp->significant = (exp->p_value < 0.05) ? 1 : 0;
+    result->p_value = exp(-diff * 10.0);
+    result->significant = (result->p_value < 0.05) ? 1 : 0;
 }
 
 void ev_llm_judge_init(EVLLMJudgeResult *judge) {

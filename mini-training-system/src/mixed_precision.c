@@ -4,13 +4,6 @@
 #include <math.h>
 #include <stdio.h>
 
-#ifdef _MSC_VER
-#include <intrin.h>
-static int mp_clz32(unsigned int x) { unsigned long idx; _BitScanReverse(&idx, x); return (int)(31 - idx); }
-#else
-static int mp_clz32(unsigned int x) { return x ? __builtin_clz(x) : 32; }
-#endif
-
 static const uint32_t FP16_EXP_MASK  = 0x7C00u;
 static const uint32_t FP16_SIGN_MASK = 0x8000u;
 static const uint32_t FP16_MANT_MASK = 0x03FFu;

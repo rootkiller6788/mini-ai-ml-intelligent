@@ -163,7 +163,13 @@ TritonCompileContext *triton_compile_begin(const char *dslSource) {
         (TritonCompileContext *)malloc(sizeof(TritonCompileContext));
     memset(ctx, 0, sizeof(*ctx));
     ctx->currentStage = TRITON_DSL;
-    ctx->sourceCode   = dslSource ? _strdup(dslSource) : NULL;
+    if (dslSource) {
+        size_t len = strlen(dslSource) + 1;
+        ctx->sourceCode = (char *)malloc(len);
+        if (ctx->sourceCode) memcpy(ctx->sourceCode, dslSource, len);
+    } else {
+        ctx->sourceCode = NULL;
+    }
     ctx->compileTimeMs = 0;
     printf("[TRITON] Compile begin (DSL stage)\n");
     return ctx;

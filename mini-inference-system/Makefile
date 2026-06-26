@@ -14,6 +14,11 @@ LIB      = $(BUILDDIR)/libinference.a
 EXAMPLES = $(patsubst $(EXAMPLEDIR)/%.c,$(BUILDDIR)/%,$(wildcard $(EXAMPLEDIR)/*.c))
 DEMOS    = $(patsubst $(DEMODIR)/%.c,$(BUILDDIR)/%,$(wildcard $(DEMODIR)/*.c))
 
+TESTDIR  = tests
+TEST     = $(BUILDDIR)/test_core
+BENCHDIR = benches
+BENCH    = $(BUILDDIR)/bench_core
+
 .PHONY: all clean demo test benchmark
 
 all: $(LIB) $(EXAMPLES) $(DEMOS)
@@ -35,6 +40,22 @@ $(BUILDDIR)/demo_%: $(DEMODIR)/demo_%.c $(LIB) | $(BUILDDIR)
 
 demo: $(DEMOS)
 	@for d in $(DEMOS); do echo "=== Running $$(basename $$d) ==="; $$d; echo; done
+
+$(TEST): $(TESTDIR)/test_core.c $(LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -I$(INCDIR) $< -L$(BUILDDIR) -linference $(LDFLAGS) -o $@
+
+test: $(LIB) $(TEST)
+	@echo "=== Running Tests ==="
+	$(TEST)
+	@echo "=== Tests Complete ==="
+
+$(BENCH): $(BENCHDIR)/bench_core.c $(LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) -I$(INCDIR) $< -L$(BUILDDIR) -linference $(LDFLAGS) -o $@
+
+benchmark: $(LIB) $(BENCH)
+	@echo "=== Running Benchmarks ==="
+	$(BENCH) 5000
+	@echo "=== Benchmarks Complete ==="
 
 clean:
 	rm -rf $(BUILDDIR)

@@ -4,11 +4,13 @@
  * Unit tests for model serving, INT8 quantization, KV cache,
  * speculative decoding, batching strategies.
  */
+#include <pthread.h>
 #include "../include/model_serving.h"
 #include "../include/quantization_int8.h"
 #include "../include/kv_cache.h"
 #include "../include/speculative_decode.h"
 #include "../include/batching_strategy.h"
+#include "../include/sampler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -176,6 +178,73 @@ static int test_bs_request_create(void) {
     return 0;
 }
 
+/* ── Sampler Tests ── */
+static int test_samp_greedy(void) {
+    TEST("samp_greedy");
+    float logits[] = {0.1f, 0.5f, 0.3f, 0.9f, 0.2f};
+    int token = samp_greedy(logits, 5);
+    CHECK(token == 3, "greedy should pick max");
+    PASS();
+    return 0;
+}
+
+static int test_samp_temperature(void) {
+    TEST("samp_temperature");
+    float logits[] = {0.1f, 2.0f, 0.5f, -1.0f, -3.0f};
+    int token = samp_temperature(logits, 5, 1.0f);
+    CHECK(token >= 0 && token < 5, "token out of range");
+    PASS();
+    return 0;
+}
+
+static int test_samp_top_p(void) {
+    TEST("samp_top_p");
+    float logits[100];
+    for (int i = 0; i < 100; i++) logits[i] = (float)i / 10.0f;
+    int token = samp_top_p(logits, 100, 0.9f, 1.0f);
+    CHECK(token >= 0 && token < 100, "token out of range");
+    PASS();
+    return 0;
+}
+
+static int test_samp_softmax(void) {
+    TEST("samp_softmax");
+    float logits[] = {1.0f, 2.0f, 3.0f};
+    float probs[3];
+    samp_softmax(probs, logits, 3, 1.0f);
+    float sum = probs[0] + probs[1] + probs[2];
+    CHECK(fabsf(sum - 1.0f) < 0.001f, "softmax should sum to 1");
+    CHECK(probs[2] > probs[1] && probs[1] > probs[0], "order should be preserved");
+    PASS();
+    return 0;
+}
+
+static int test_samp_config(void) {
+    TEST("samp_config");
+    Samp_Config cfg = samp_config_default();
+    CHECK(samp_config_validate(&cfg), "default config should be valid");
+    cfg.temperature = -1.0f;
+    CHECK(!samp_config_validate(&cfg), "negative temp should be invalid");
+    PASS();
+    return 0;
+}
+
+static int test_samp_generate(void) {
+    TEST("samp_generate");
+    /* Allocate logits for max_new_tokens steps × vocab_size */
+    float* logits = malloc((size_t)256 * 32 * sizeof(float));
+    for (int i = 0; i < 256 * 32; i++) logits[i] = (float)(i % 1000) / 1000.0f;
+    int output[16];
+    Samp_Config cfg = samp_config_default();
+    cfg.strategy = SAMP_GREEDY;
+    int n = samp_generate(logits, 5, 256, output, 16, &cfg);
+    free(logits);
+    CHECK(n > 0, "should generate at least one token");
+    CHECK(n <= 16, "should not exceed max_new_tokens");
+    PASS();
+    return 0;
+}
+
 int main(void) {
     printf("=== mini-inference-system Unit Tests ===\n\n");
 
@@ -193,6 +262,12 @@ int main(void) {
     failed += test_sd_ngram_init();
     failed += test_bs_scheduler_init();
     failed += test_bs_request_create();
+    failed += test_samp_greedy();
+    failed += test_samp_temperature();
+    failed += test_samp_top_p();
+    failed += test_samp_softmax();
+    failed += test_samp_config();
+    failed += test_samp_generate();
 
     printf("\n=== Results: %d/%d passed, %d failed ===\n",
            tests_passed, tests_run, failed);

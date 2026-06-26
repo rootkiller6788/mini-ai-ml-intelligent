@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #define MS_MAX_MODEL_NAME     256
 #define MS_MAX_INSTANCES      16

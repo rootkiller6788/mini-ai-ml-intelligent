@@ -26,12 +26,15 @@ int main(void) {
     printf("=== Stable Diffusion Image Generation Demo ===\n\n");
 
     printf("--- VAE (Variational Autoencoder) ---\n");
+    int vae_blocks = 2;
     mm_vae_t vae;
-    mm_vae_init(&vae, 4, 64, 2);
-    printf("VAE initialized: latent_dim=%d, base_channels=%d, res_blocks=%d\n\n", 4, 64, 2);
+    mm_vae_init(&vae, 4, 64, vae_blocks);
+    printf("VAE initialized: latent_dim=%d, base_channels=%d, res_blocks=%d\n\n", 4, 64, vae_blocks);
 
+    /* VAE with N res_blocks does (N-1) 2x downsamplings */
+    int vae_scale = 1 << (vae_blocks - 1);  /* 2^(N-1) */
     int img_h = 128, img_w = 128, img_c = 3;
-    int latent_h = img_h / 8, latent_w = img_w / 8;
+    int latent_h = img_h / vae_scale, latent_w = img_w / vae_scale;
     int img_n = img_h * img_w * img_c;
     int latent_n = latent_h * latent_w * 4;
 
@@ -112,15 +115,16 @@ int main(void) {
     print_image_stats(noise_cond, ls, ls, 4, "CFG result (scale=7.5)");
 
     printf("\n--- Full Stable Diffusion Pipeline ---\n");
+    int sd_blocks = 4;  /* 4 blocks → 3 downsamples → 8x reduction */
     mm_stable_diffusion_t sd;
-    mm_sd_init(&sd, SD_IMG_SIZE, 4, 64, 1);
+    mm_sd_init(&sd, SD_IMG_SIZE, 4, 32, sd_blocks);
     printf("SD initialized: image=%d, latent=%d, timesteps=%d\n\n", sd.image_size, sd.latent_size, sd.num_timesteps);
 
     float* generated = (float*)malloc((size_t)SD_IMG_SIZE * SD_IMG_SIZE * 3 * sizeof(float));
     float* placeholder_ctx = (float*)calloc((size_t)768, sizeof(float));
     for (int i = 0; i < 768; i++) placeholder_ctx[i] = ((float)rand() / (float)RAND_MAX - 0.5f) * 0.02f;
 
-    mm_sd_generate(&sd, placeholder_ctx, 768, SD_STEPS, MM_SD_SAMPLER_DDIM,
+    mm_sd_generate(&sd, placeholder_ctx, 1, SD_STEPS, MM_SD_SAMPLER_DDIM,
                    SD_IMG_SIZE, SD_IMG_SIZE, 3, generated);
     print_image_stats(generated, SD_IMG_SIZE, SD_IMG_SIZE, 3, "Generated image");
 
@@ -131,7 +135,7 @@ int main(void) {
     }
 
     float* inpainted = (float*)malloc((size_t)SD_IMG_SIZE * SD_IMG_SIZE * 3 * sizeof(float));
-    mm_sd_inpaint(&sd, generated, mask, placeholder_ctx, 768,
+    mm_sd_inpaint(&sd, generated, mask, placeholder_ctx, 1,
                   SD_IMG_SIZE, SD_IMG_SIZE, 3, SD_STEPS / 2, inpainted);
     print_image_stats(inpainted, SD_IMG_SIZE, SD_IMG_SIZE, 3, "Inpainted image");
 

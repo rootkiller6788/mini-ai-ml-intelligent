@@ -1,5 +1,6 @@
 #include "ensemble_gbdt.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -183,51 +184,122 @@ void gbdt_destroy(GBDTModel *gb) {
     memset(gb, 0, sizeof(GBDTModel));
 }
 
-/* Simple regression stump builder for gradient boosting */
-static double build_reg_tree(const double *X, const double *res,
-                             size_t n, size_t d, size_t depth) {
-    double best_loss = 1e308;
-    double best_val  = 0.0;
-    int    best_feat = -1;
-    double best_thr  = 0.0;
+/*
+ * Simple regression tree builder for gradient boosting.
+ * Fits a single CART tree to residuals using MSE splitting criterion.
+ * Tree storage: uses pre-allocated flat arrays indexed by node id.
+ * Each tree is stored as left_child, right_child, split_feat, split_val, leaf_val.
+ *
+ * Returns the root node index.
+ */
+typedef struct {
+    const double *X;
+    const double *y;
+    size_t n;
+    size_t d;
+    size_t max_depth;
+    /* shared flat tree storage */
+    size_t  capacity;
+    size_t  node_count;
+    int    *left_child;
+    int    *right_child;
+    int    *split_feat;
+    double *split_val;
+    double *leaf_val;
+} TreeBuilder;
 
-    if (depth == 0) {
-        /* leaf: return mean residual */
-        double s = 0.0;
-        for (size_t i = 0; i < n; ++i) s += res[i];
-        return s / (double)n;
+static int tree_builder_new_node(TreeBuilder *tb) {
+    int id = (int)tb->node_count;
+    tb->node_count++;
+    tb->left_child[id] = -1;
+    tb->right_child[id] = -1;
+    tb->split_feat[id] = -1;
+    tb->split_val[id]  = 0.0;
+    tb->leaf_val[id]   = 0.0;
+    return id;
+}
+
+static int tree_builder_build(TreeBuilder *tb, const size_t *indices,
+                               size_t n_samples, size_t depth) {
+    int node_id = tree_builder_new_node(tb);
+
+    /* Compute mean of residuals for this node */
+    double sum_y = 0.0;
+    for (size_t i = 0; i < n_samples; ++i)
+        sum_y += tb->y[indices[i]];
+    double mean_y = sum_y / (double)n_samples;
+
+    if (depth >= tb->max_depth || n_samples <= 1) {
+        tb->leaf_val[node_id] = mean_y;
+        return node_id;
     }
 
-    for (size_t f = 0; f < d; ++f) {
-        for (size_t i = 0; i < n; ++i) {
-            double thr = X[i * d + f];
+    /* Find best split */
+    double best_gain = DBL_MAX;
+    int    best_feat = -1;
+    double best_thr  = 0.0;
+    double best_left_mean = 0.0;
+
+    for (size_t f = 0; f < tb->d; ++f) {
+        for (size_t p = 0; p < n_samples; ++p) {
+            double thr = tb->X[indices[p] * tb->d + f];
             double sl = 0.0, sr = 0.0;
             size_t nl = 0, nr = 0;
-            for (size_t j = 0; j < n; ++j) {
-                if (X[j * d + f] <= thr) { sl += res[j]; nl++; }
-                else                      { sr += res[j]; nr++; }
+            for (size_t j = 0; j < n_samples; ++j) {
+                size_t idx = indices[j];
+                if (tb->X[idx * tb->d + f] <= thr) {
+                    sl += tb->y[idx]; nl++;
+                } else {
+                    sr += tb->y[idx]; nr++;
+                }
             }
             if (nl == 0 || nr == 0) continue;
             double ml = sl / (double)nl, mr = sr / (double)nr;
-            double loss = 0.0;
-            for (size_t j = 0; j < n; ++j) {
-                double r = res[j];
-                if (X[j * d + f] <= thr)
-                    loss += (r - ml) * (r - ml);
-                else
-                    loss += (r - mr) * (r - mr);
+            double gain = 0.0;
+            for (size_t j = 0; j < n_samples; ++j) {
+                size_t idx = indices[j];
+                double r = tb->y[idx];
+                double pred = (tb->X[idx * tb->d + f] <= thr) ? ml : mr;
+                double err = r - pred;
+                gain += err * err;
             }
-            if (loss < best_loss) {
-                best_loss = loss;
-                best_feat = (int)f;
-                best_thr  = thr;
-                best_val  = 0.0;
+            if (gain < best_gain) {
+                best_gain  = gain;
+                best_feat  = (int)f;
+                best_thr   = thr;
+                best_left_mean  = ml;
             }
         }
     }
-    /* return leaf value for this split – left avg */
-    (void)best_feat; (void)best_thr;
-    return best_val;
+
+    if (best_feat < 0) {
+        tb->leaf_val[node_id] = mean_y;
+        return node_id;
+    }
+
+    /* Split indices */
+    size_t *left_idx  = (size_t *)malloc(n_samples * sizeof(size_t));
+    size_t *right_idx = (size_t *)malloc(n_samples * sizeof(size_t));
+    size_t nl = 0, nr = 0;
+    for (size_t i = 0; i < n_samples; ++i) {
+        if (tb->X[indices[i] * tb->d + best_feat] <= best_thr)
+            left_idx[nl++]  = indices[i];
+        else
+            right_idx[nr++] = indices[i];
+    }
+
+    tb->split_feat[node_id] = best_feat;
+    tb->split_val[node_id]  = best_thr;
+    tb->leaf_val[node_id]   = best_left_mean;  /* stored but internal nodes use children */
+
+    if (nl > 0)
+        tb->left_child[node_id]  = tree_builder_build(tb, left_idx, nl, depth + 1);
+    if (nr > 0)
+        tb->right_child[node_id] = tree_builder_build(tb, right_idx, nr, depth + 1);
+
+    free(left_idx);
+    free(right_idx);
+    return node_id;
 }
 
 void gbdt_fit(GBDTModel *gb,
@@ -236,30 +308,100 @@ void gbdt_fit(GBDTModel *gb,
     (void)seed;
     gb->n_samples = n_samples;
     size_t d = gb->n_features;
-    gb->pred = (double *)calloc(n_samples, sizeof(double));
-    /* initialise with mean */
+    size_t n_est = gb->n_estimators;
+    size_t max_nodes = n_est * (size_t)(1 << (gb->max_depth + 1));  /* upper bound per tree */
+
+    /* Allocate flat tree storage */
+    gb->pred        = (double *)calloc(n_samples, sizeof(double));
+    gb->left_child  = (int    *)calloc(max_nodes, sizeof(int));
+    gb->right_child = (int    *)calloc(max_nodes, sizeof(int));
+    gb->split_feat  = (int    *)calloc(max_nodes, sizeof(int));
+    gb->split_val   = (double *)calloc(max_nodes, sizeof(double));
+    gb->leaf_val    = (double *)calloc(max_nodes, sizeof(double));
+
+    /* Initialise with mean of y */
     double mean_y = 0.0;
     for (size_t i = 0; i < n_samples; ++i) mean_y += y[i];
     mean_y /= (double)n_samples;
     for (size_t i = 0; i < n_samples; ++i) gb->pred[i] = mean_y;
 
-    for (size_t t = 0; t < gb->n_estimators; ++t) {
+    size_t *indices = (size_t *)malloc(n_samples * sizeof(size_t));
+    for (size_t i = 0; i < n_samples; ++i) indices[i] = i;
+
+    TreeBuilder tb;
+    tb.X = X;
+    tb.d = d;
+    tb.max_depth = gb->max_depth;
+    tb.capacity = max_nodes;
+    tb.node_count = 0;
+
+    for (size_t t = 0; t < n_est; ++t) {
+        /* Compute residuals */
         double *residuals = (double *)malloc(n_samples * sizeof(double));
         for (size_t i = 0; i < n_samples; ++i)
             residuals[i] = y[i] - gb->pred[i];
-        double leaf = build_reg_tree(X, residuals, n_samples, d, gb->max_depth);
-        for (size_t i = 0; i < n_samples; ++i)
-            gb->pred[i] += gb->learning_rate * leaf;
+
+        /* Point tree builder at current storage region */
+        size_t base = t * (size_t)(1 << (gb->max_depth + 1));
+        tb.n          = n_samples;
+        tb.y          = residuals;
+        tb.left_child  = gb->left_child  + base;
+        tb.right_child = gb->right_child + base;
+        tb.split_feat  = gb->split_feat  + base;
+        tb.split_val   = gb->split_val   + base;
+        tb.leaf_val    = gb->leaf_val    + base;
+
+        tree_builder_build(&tb, indices, n_samples, 0);
+
+        /* Update predictions: traverse tree and add lr * leaf_val */
+        for (size_t i = 0; i < n_samples; ++i) {
+            int node = 0;
+            /* traverse until leaf */
+            while (true) {
+                int feat = gb->split_feat[base + node];
+                if (feat < 0) {
+                    gb->pred[i] += gb->learning_rate * gb->leaf_val[base + node];
+                    break;
+                }
+                double val = X[i * d + feat];
+                if (val <= gb->split_val[base + node])
+                    node = gb->left_child[base + node];
+                else
+                    node = gb->right_child[base + node];
+                if (node < 0) {
+                    gb->pred[i] += gb->learning_rate * gb->leaf_val[base + 0];
+                    break;
+                }
+            }
+        }
         free(residuals);
+    }
+    free(indices);
+}
+
+/* Traverse all trees and sum leaf contributions */
+static double gbdt_traverse_tree(const GBDTModel *gb, const double *x,
+                                  size_t tree_idx, size_t base_nodes) {
+    size_t base = tree_idx * base_nodes;
+    int node = 0;
+    while (true) {
+        int feat = gb->split_feat[base + node];
+        if (feat < 0) return gb->leaf_val[base + node];
+        double val = x[feat];
+        if (val <= gb->split_val[base + node])
+            node = gb->left_child[base + node];
+        else
+            node = gb->right_child[base + node];
+        if (node < 0) return gb->leaf_val[base + 0];
     }
 }
 
 double gbdt_predict(const GBDTModel *gb, const double *x) {
     double sum = 0.0;
-    for (size_t i = 0; i < gb->n_estimators; ++i)
-        sum += gb->learning_rate;  /* stub: each tree contributes ~mean */
-    (void)x;
-    return sum * gb->n_samples / gb->n_estimators;
+    size_t base_nodes = (size_t)(1 << (gb->max_depth + 1));
+    for (size_t t = 0; t < gb->n_estimators; ++t)
+        sum += gbdt_traverse_tree(gb, x, t, base_nodes);
+    return sum;
 }
 
 void gbdt_predict_batch(const GBDTModel *gb, const double *X,
@@ -280,6 +422,7 @@ XGBoostModel xgb_create(size_t n_estimators, double eta,
     xgb.eta    = eta;
     xgb.lambda = lambda;
     xgb.gamma  = gamma;
+    xgb.base_score  = 0.0;
     xgb.max_depth  = max_depth;
     xgb.n_features = n_features;
     xgb.left_child = NULL;
@@ -299,17 +442,180 @@ void xgb_destroy(XGBoostModel *xgb) {
     memset(xgb, 0, sizeof(XGBoostModel));
 }
 
+/*
+ * XGBoost-style fitting using second-order Taylor expansion of loss.
+ *
+ * For squared-error regression (L2 loss):
+ *   gᵢ = ∂L/∂ŷ = ŷᵢ − yᵢ  (negative residual)
+ *   hᵢ = ∂²L/∂ŷ² = 1       (constant)
+ *
+ * The optimal leaf weight for leaf j with sample set Iⱼ:
+ *   wⱼ* = − Σ_{i∈Iⱼ} gᵢ / (Σ_{i∈Iⱼ} hᵢ + λ)
+ *
+ * Split gain:
+ *   Gain = ½ [ (G_L²/(H_L+λ) + G_R²/(H_R+λ) − (G_L+G_R)²/(H_L+H_R+λ) ] − γ
+ *   where G_L = Σ_{i∈L} gᵢ, H_L = Σ_{i∈L} hᵢ
+ *
+ * This matches the XGBoost paper (Chen & Guestrin, 2016) for the
+ * simple case of regression with L2 loss and L2 regularisation.
+ */
 void xgb_fit(XGBoostModel *xgb,
              const double *X, const double *y,
              size_t n_samples, size_t seed) {
-    (void)xgb; (void)X; (void)y; (void)n_samples; (void)seed;
-    /* Placeholder – full second-order Taylor implementation omitted
-       in this lightweight educational version.                      */
+    (void)seed;
+    size_t d = xgb->n_features;
+    size_t n_est = xgb->n_estimators;
+    size_t max_depth = xgb->max_depth;
+    double lambda = xgb->lambda;
+    double gamma  = xgb->gamma;
+    double eta    = xgb->eta;
+    size_t max_nodes = n_est * (size_t)(1 << (max_depth + 1));
+
+    /* Allocate storage */
+    xgb->left_child  = (int    *)calloc(max_nodes, sizeof(int));
+    xgb->right_child = (int    *)calloc(max_nodes, sizeof(int));
+    xgb->split_feat  = (int    *)calloc(max_nodes, sizeof(int));
+    xgb->split_val   = (double *)calloc(max_nodes, sizeof(double));
+    xgb->leaf_score  = (double *)calloc(max_nodes, sizeof(double));
+
+    /* Initial prediction: mean of y (L2 optimal constant) */
+    double *pred = (double *)calloc(n_samples, sizeof(double));
+    double mean_y = 0.0;
+    for (size_t i = 0; i < n_samples; ++i) mean_y += y[i];
+    mean_y /= (double)n_samples;
+    xgb->base_score = mean_y;
+    for (size_t i = 0; i < n_samples; ++i) pred[i] = mean_y;
+
+    size_t base_nodes = (size_t)(1 << (max_depth + 1));
+
+    for (size_t t = 0; t < n_est; ++t) {
+        /* Compute first and second order gradients for L2 loss */
+        double *g = (double *)malloc(n_samples * sizeof(double));
+        double *h = (double *)malloc(n_samples * sizeof(double));
+        for (size_t i = 0; i < n_samples; ++i) {
+            g[i] = pred[i] - y[i];   /* gradient of L2 */
+            h[i] = 1.0;               /* hessian of L2  */
+        }
+
+        /* Build a single regression tree optimising the XGBoost objective */
+        /* Simple recursive split-finding at each node */
+        size_t *indices = (size_t *)malloc(n_samples * sizeof(size_t));
+        for (size_t i = 0; i < n_samples; ++i) indices[i] = i;
+
+        size_t base = t * base_nodes;
+        /* Initialize first node as leaf */
+        xgb->split_feat[base + 0] = -1;  /* mark as leaf */
+
+        /* Build tree: recursively find best splits using gradient sums */
+        /* Stack-based iterative builder */
+        /* For simplicity, a single-level split (stump) with exhaustive search */
+        {
+            double G_all = 0.0, H_all = 0.0;
+            for (size_t i = 0; i < n_samples; ++i) { G_all += g[i]; H_all += h[i]; }
+
+            double best_gain = 0.0;
+            int    best_feat = -1;
+            double best_thr  = 0.0;
+
+            /* Exhaustive search over features and thresholds */
+            for (size_t f = 0; f < d; ++f) {
+                for (size_t p = 0; p < n_samples && p < 200; ++p) {
+                    double thr = X[indices[p] * d + f];
+                    double GL = 0.0, HL = 0.0, GR = 0.0, HR = 0.0;
+                    size_t nl = 0;
+                    for (size_t i = 0; i < n_samples; ++i) {
+                        size_t idx = indices[i];
+                        if (X[idx * d + f] <= thr) {
+                            GL += g[idx]; HL += h[idx]; nl++;
+                        } else {
+                            GR += g[idx]; HR += h[idx];
+                        }
+                    }
+                    if (nl == 0 || nl == n_samples) continue;
+                    double gain = (GL * GL) / (HL + lambda)
+                                + (GR * GR) / (HR + lambda)
+                                - (G_all * G_all) / (H_all + lambda);
+                    gain = 0.5 * gain - gamma;
+                    if (gain > best_gain) {
+                        best_gain = gain;
+                        best_feat = (int)f;
+                        best_thr  = thr;
+                    }
+                }
+            }
+
+            if (best_feat >= 0) {
+                /* Store split at root */
+                xgb->split_feat[base + 0] = best_feat;
+                xgb->split_val[base + 0]  = best_thr;
+
+                /* Compute leaf weights for children */
+                double GL = 0.0, HL = 0.0, GR = 0.0, HR = 0.0;
+                for (size_t i = 0; i < n_samples; ++i) {
+                    size_t idx = indices[i];
+                    if (X[idx * d + best_feat] <= best_thr) {
+                        GL += g[idx]; HL += h[idx];
+                    } else {
+                        GR += g[idx]; HR += h[idx];
+                    }
+                }
+                /* Left leaf (node 1) */
+                xgb->split_feat[base + 1]  = -1;
+                xgb->leaf_score[base + 1]  = -GL / (HL + lambda);
+                xgb->left_child[base + 0]  = 1;
+                /* Right leaf (node 2) */
+                xgb->split_feat[base + 2]  = -1;
+                xgb->leaf_score[base + 2]  = -GR / (HR + lambda);
+                xgb->right_child[base + 0] = 2;
+            } else {
+                /* No good split — single leaf */
+                xgb->split_feat[base + 0] = -1;
+                xgb->leaf_score[base + 0] = -G_all / (H_all + lambda);
+            }
+        }
+
+        /* Update predictions */
+        for (size_t i = 0; i < n_samples; ++i) {
+            int node = 0;
+            while (true) {
+                int feat = xgb->split_feat[base + node];
+                if (feat < 0) {
+                    pred[i] += eta * xgb->leaf_score[base + node];
+                    break;
+                }
+                if (X[i * d + feat] <= xgb->split_val[base + node])
+                    node = xgb->left_child[base + node];
+                else
+                    node = xgb->right_child[base + node];
+                if (node < 0) break;
+            }
+        }
+
+        free(g); free(h); free(indices);
+    }
+    free(pred);
 }
 
 double xgb_predict(const XGBoostModel *xgb, const double *x) {
-    (void)xgb; (void)x;
-    return 0.0;
+    double sum = xgb->base_score;
+    size_t base_nodes = (size_t)(1 << (xgb->max_depth + 1));
+    for (size_t t = 0; t < xgb->n_estimators; ++t) {
+        size_t base = t * base_nodes;
+        int node = 0;
+        while (true) {
+            int feat = xgb->split_feat[base + node];
+            if (feat < 0) {
+                sum += xgb->eta * xgb->leaf_score[base + node];
+                break;
+            }
+            if (x[feat] <= xgb->split_val[base + node])
+                node = xgb->left_child[base + node];
+            else
+                node = xgb->right_child[base + node];
+            if (node < 0) break;
+        }
+    }
+    return sum;
 }
 
 /* ──────────────────────────────────────────────

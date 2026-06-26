@@ -255,11 +255,196 @@ void hac_destroy(HierarchicalClustering *hc) {
     hc->merge_height = NULL;
 }
 
+/*
+ * HAC (Agglomerative Clustering) — O(n²) pairwise distance + union-find merge
+ *
+ * Algorithm (Lance–Williams, 1967):
+ *   1. Start with each point as its own cluster.
+ *   2. Compute pairwise distance matrix (cached, O(n²) memory).
+ *   3. Repeatedly merge two closest clusters using selected linkage.
+ *   4. Track merge history for dendrogram reconstruction.
+ *
+ * Linkage formulas (Lance-Williams recurrence):
+ *   d(C_new, C_k) = α_a·d(C_a,C_k) + α_b·d(C_b,C_k) + γ·|d(C_a,C_k)−d(C_b,C_k)|
+ *
+ *   Single:   α_a=½, α_b=½, β=−½, γ=0  → min of pairwise
+ *   Complete: α_a=½, α_b=½, β=½,  γ=0  → max of pairwise
+ *   Average:  α_a=|C_a|/(|C_a|+|C_b|), α_b=|C_b|/(|C_a|+|C_b|)
+ */
 void hac_fit(HierarchicalClustering *hc,
              const double *X, size_t n_samples, size_t dim) {
-    (void)hc; (void)X; (void)n_samples; (void)dim;
-    /* Placeholder – the full O(n²)-distance implementation is omitted
-       in this lightweight educational library.                       */
+    size_t n = n_samples;
+    hc->n_samples = n;
+    /* store merge history: (n−1 merges, each records (i,j)) */
+    hc->merge = (int *)calloc((n - 1) * 2, sizeof(int));
+    hc->merge_height = (double *)calloc(n - 1, sizeof(double));
+    if (n <= 1) {
+        hc->labels = (int *)calloc(n, sizeof(int));
+        return;
+    }
+
+    /* Initial clusters: each point */
+    size_t  n_clusters = n;
+    int    *parent  = (int    *)malloc(n * sizeof(int));
+    size_t *size    = (size_t *)malloc(n * sizeof(size_t));
+    for (size_t i = 0; i < n; ++i) { parent[i] = (int)i; size[i] = 1; }
+
+    /* Distance matrix: stored as full n×n (upper-triangular implicitly computed) */
+    /* For simplicity we store complete symmetric matrix and use it for lookups */
+    double *dist_mat = (double *)malloc(n * n * sizeof(double));
+    for (size_t i = 0; i < n; ++i) {
+        dist_mat[i * n + i] = 0.0;
+        for (size_t j = i + 1; j < n; ++j) {
+            double sq = 0.0;
+            for (size_t k = 0; k < dim; ++k) {
+                double d = X[i * dim + k] - X[j * dim + k];
+                sq += d * d;
+            }
+            double d = sqrt(sq);
+            dist_mat[i * n + j] = d;
+            dist_mat[j * n + i] = d;
+        }
+    }
+
+    /* Union-find: find representative (root cluster id) */
+    /* Since we merge clusters, we maintain "active" cluster ids as indices
+       and mark merged ones as inactive.  Active set shrinks each iteration. */
+
+    /* Mark active clusters */
+    bool *active = (bool *)malloc(n * sizeof(bool));
+    for (size_t i = 0; i < n; ++i) active[i] = true;
+
+    size_t merge_count = 0;
+    while (n_clusters > hc->n_clusters) {
+        /* Find the closest pair of active clusters */
+        double best_dist = DBL_MAX;
+        size_t best_i = 0, best_j = 0;
+
+        for (size_t i = 0; i < n; ++i) {
+            if (!active[i]) continue;
+            for (size_t j = i + 1; j < n; ++j) {
+                if (!active[j]) continue;
+                if (dist_mat[i * n + j] < best_dist) {
+                    best_dist = dist_mat[i * n + j];
+                    best_i = i;
+                    best_j = j;
+                }
+            }
+        }
+
+        if (best_dist == DBL_MAX) break;
+
+        /* Record merge */
+        hc->merge[merge_count * 2]     = (int)best_i;
+        hc->merge[merge_count * 2 + 1] = (int)best_j;
+        hc->merge_height[merge_count]   = best_dist;
+        merge_count++;
+
+        /* Merge best_j into best_i */
+        size_t sz_i = size[best_i];
+        size_t sz_j = size[best_j];
+        size_t sz_new = sz_i + sz_j;
+
+        /* Update distances from new cluster (best_i) to all other active clusters */
+        for (size_t k = 0; k < n; ++k) {
+            if (k == best_i || k == best_j || !active[k]) continue;
+            double di = dist_mat[best_i * n + k];
+            double dj = dist_mat[best_j * n + k];
+            double d_new;
+            switch (hc->linkage) {
+            case HAC_LINKAGE_SINGLE:
+                d_new = (di < dj) ? di : dj;
+                break;
+            case HAC_LINKAGE_COMPLETE:
+                d_new = (di > dj) ? di : dj;
+                break;
+            case HAC_LINKAGE_AVERAGE:
+            default:
+                d_new = ((double)sz_i * di + (double)sz_j * dj) / (double)sz_new;
+                break;
+            }
+            dist_mat[best_i * n + k] = d_new;
+            dist_mat[k * n + best_i] = d_new;
+        }
+
+        active[best_j] = false;
+        size[best_i]   = sz_new;
+        n_clusters--;
+    }
+
+    /* Assign labels: each active cluster gets a label 0..K-1 */
+    hc->labels = (int *)calloc(n, sizeof(int));
+    int label = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (active[i]) {
+            hc->labels[i] = label++;
+        }
+    }
+    /* For inactive clusters, follow merge history to find final label */
+    /* For simplicity, propagate: inactive clusters are those that got merged */
+    /* In the current scheme, all points start active and points in merged
+       clusters need to be labeled.  We label all points by finding their
+       root after merging, but since we track active/dead:            */
+    /* A more precise approach: label clusters via union-find */
+    for (size_t i = 0; i < n; ++i) {
+        if (!active[i]) {
+            /* find which active cluster this was merged into */
+            for (size_t m = merge_count; m > 0; --m) {
+                size_t mi = (size_t)hc->merge[(m-1) * 2];
+                size_t mj = (size_t)hc->merge[(m-1) * 2 + 1];
+                if (mi == i) { i = mj; break; }
+                if (mj == i) { i = mi; break; }
+            }
+            hc->labels[i] = hc->labels[i]; /* use same label */
+        }
+    }
+
+    /* Re-label points based on their final cluster membership */
+    /* Simple approach: walk merge history from the end and assign labels */
+    {
+        int *point_label = (int *)malloc(n * sizeof(int));
+        for (size_t p = 0; p < n; ++p) point_label[p] = (int)p;
+
+        /* Replay merges: when two clusters merge, all points in the
+           "dead" cluster adopt the label of the surviving cluster */
+        for (size_t m = 0; m < merge_count; ++m) {
+            int ci = hc->merge[m * 2];
+            int cj = hc->merge[m * 2 + 1];
+            for (size_t p = 0; p < n; ++p) {
+                if (point_label[p] == cj)
+                    point_label[p] = ci;
+            }
+        }
+
+        /* Now compress remaining labels to 0..K-1 */
+        int label_map[4096] = {0};
+        int next_label = 0;
+        for (size_t p = 0; p < n && p < 4096; ++p) {
+            int raw = point_label[p];
+            bool found = false;
+            for (int lm = 0; lm < next_label; ++lm) {
+                for (size_t q = 0; q < p; ++q) {
+                    if (point_label[q] == raw && hc->labels[q] == lm) {
+                        found = true;
+                        hc->labels[p] = lm;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+            if (!found) {
+                hc->labels[p] = next_label;
+                label_map[next_label] = raw;
+                next_label++;
+            }
+        }
+        free(point_label);
+    }
+
+    free(dist_mat);
+    free(parent);
+    free(size);
+    free(active);
 }
 
 /* ──────────────────────────────────────────────

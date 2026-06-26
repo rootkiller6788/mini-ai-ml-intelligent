@@ -291,11 +291,11 @@ bool ckpt_recover_from_fault(ckpt_context_t* ctx, ckpt_load_weights_fn load_fn,
 
 uint64_t ckpt_crc32(const void* data, size_t len) {
     const uint8_t* buf = (const uint8_t*)data;
-    uint64_t crc = 0xFFFFFFFFFFFFFFFFULL;
+    uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < len; i++) {
         crc ^= buf[i];
         for (int j = 0; j < 8; j++)
-            crc = (crc >> 1) ^ (0xEDB88320F3C2A1D6ULL & -(cr);
+            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1u));
     }
-    return crc;
+    return (uint64_t)(~crc);
 }

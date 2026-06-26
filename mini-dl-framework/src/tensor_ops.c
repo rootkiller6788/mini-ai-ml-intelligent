@@ -273,10 +273,21 @@ Tensor* tensor_div_broadcast(Tensor* a, Tensor* b) {
 }
 
 Tensor* tensor_matmul(Tensor* a, Tensor* b) {
-    int M, K_a, K_b, N;
-    int ndim = a->ndim > b->ndim ? a->ndim : b->ndim;
+    /* L5: Matrix multiplication with batch support.
+     * Standard: A[M,K] * B[K,N] = C[M,N]
+     * Batched: A[...,M,K] * B[...,K,N] = C[...,M,N]
+     * M = a->dims[a->ndim-2], K = a->dims[a->ndim-1] = b->dims[b->ndim-2],
+     * N = b->dims[b->ndim-1]
+     *
+     * L4: BLAS Level 3 operation O(M*N*K). Naive triple-loop.
+     * Cache-friendly tiling and blocking omitted for clarity. */
 
+    /* Handle vector-vector dot product */
     if (a->ndim == 1 && b->ndim == 1) {
+        if (a->size != b->size) {
+            printf("matmul shape mismatch: vectors of size %d and %d\n", a->size, b->size);
+            return NULL;
+        }
         float dot = 0;
         for (int i = 0; i < a->size; i++) dot += a->data[i] * b->data[i];
         int od[] = {1};
@@ -285,73 +296,111 @@ Tensor* tensor_matmul(Tensor* a, Tensor* b) {
         return out;
     }
 
-    M = (a->ndim == 1) ? 1 : a->dims[0];
-    K_a = (a->ndim == 1) ? a->dims[0] : a->dims[a->ndim - 1];
-    K_b = (b->ndim == 1) ? b->dims[0] : b->dims[b->ndim - 2];
-    N = (b->ndim == 1) ? 1 : b->dims[b->ndim - 1];
+    /* Determine matrix dimensions from last two axes */
+    int M = (a->ndim >= 2) ? a->dims[a->ndim - 2] : 1;
+    int K_a = a->dims[a->ndim - 1];
+    int K_b = (b->ndim >= 2) ? b->dims[b->ndim - 2] : b->dims[0];
+    int N = b->dims[b->ndim - 1];
+
+    /* Handle vector-matrix: A[K] * B[K,N] = C[N] */
+    if (a->ndim == 1) {
+        if (a->dims[0] != K_b) {
+            printf("matmul shape mismatch: %d != %d\n", a->dims[0], K_b);
+            return NULL;
+        }
+        Tensor* out = tensor_create((int[]){N}, 1);
+        for (int j = 0; j < N; j++) {
+            float sum = 0;
+            for (int k = 0; k < K_b; k++)
+                sum += a->data[k] * b->data[k * N + j];
+            out->data[j] = sum;
+        }
+        return out;
+    }
+
+    /* Handle matrix-vector: A[M,K] * B[K] = C[M] */
+    if (b->ndim == 1) {
+        if (K_a != b->dims[0]) {
+            printf("matmul shape mismatch: %d != %d\n", K_a, b->dims[0]);
+            return NULL;
+        }
+        Tensor* out = tensor_create((int[]){M}, 1);
+        for (int i = 0; i < M; i++) {
+            float sum = 0;
+            for (int k = 0; k < K_a; k++)
+                sum += a->data[i * K_a + k] * b->data[k];
+            out->data[i] = sum;
+        }
+        return out;
+    }
 
     if (K_a != K_b) {
-        printf("matmul shape mismatch: last dim of A (%d) != first dim of B (%d)\n", K_a, K_b);
+        printf("matmul shape mismatch: K_a=%d != K_b=%d\n", K_a, K_b);
         return NULL;
     }
     int K = K_a;
 
-    if (ndim > 2) {
-        int batch_size = 1;
-        int* batch_dims = (int*)malloc(sizeof(int) * (ndim - 2));
-        for (int i = 0; i < ndim - 2; i++) {
-            int ad = (a->ndim > 2 && i < a->ndim - 2) ? a->dims[i] : 1;
-            int bd = (b->ndim > 2 && i < b->ndim - 2) ? b->dims[i] : 1;
-            batch_dims[i] = ad > bd ? ad : bd;
+    int ndim_max = (a->ndim > b->ndim) ? a->ndim : b->ndim;
+
+    /* Batched matmul: compute batch dimensions */
+    int num_batch_dims = ndim_max - 2;
+    int batch_size = 1;
+    int* batch_dims = NULL;
+    if (num_batch_dims > 0) {
+        batch_dims = (int*)malloc(sizeof(int) * num_batch_dims);
+        for (int i = 0; i < num_batch_dims; i++) {
+            int ad = (i < a->ndim - 2) ? a->dims[i] : 1;
+            int bd = (i < b->ndim - 2) ? b->dims[i] : 1;
+            batch_dims[i] = (ad > bd) ? ad : bd;
             batch_size *= batch_dims[i];
         }
+    }
 
-        int out_dims_tmp[8];
-        for (int i = 0; i < ndim - 2; i++) out_dims_tmp[i] = batch_dims[i];
-        if (a->ndim == 1) {
-            out_dims_tmp[ndim - 2] = N;
-        } else {
-            out_dims_tmp[ndim - 2] = M;
-            out_dims_tmp[ndim - 1] = N;
-        }
-        int out_ndim = (a->ndim == 1) ? ndim - 1 : ndim;
+    /* Build output dims: [batch_dims..., M, N] */
+    int out_ndim = num_batch_dims + 2;
+    int out_dims_tmp[8];
+    for (int i = 0; i < num_batch_dims; i++)
+        out_dims_tmp[i] = batch_dims[i];
+    out_dims_tmp[num_batch_dims] = M;
+    out_dims_tmp[num_batch_dims + 1] = N;
 
-        Tensor* out = tensor_create(out_dims_tmp, out_ndim);
+    Tensor* out = tensor_create(out_dims_tmp, out_ndim);
+
+    if (batch_size > 1 || num_batch_dims > 0) {
         int a_mat_stride = M * K;
         int b_mat_stride = K * N;
         int c_mat_stride = M * N;
 
         for (int b_idx = 0; b_idx < batch_size; b_idx++) {
-            int a_idx = b_idx * a_mat_stride;
-            int b_idx2 = b_idx * b_mat_stride;
-            int c_idx2 = b_idx * c_mat_stride;
+            int a_off = b_idx * a_mat_stride;
+            int b_off = b_idx * b_mat_stride;
+            int c_off = b_idx * c_mat_stride;
 
             for (int i = 0; i < M; i++) {
                 for (int j = 0; j < N; j++) {
                     float sum = 0;
                     for (int k = 0; k < K; k++) {
-                        sum += a->data[a_idx + i * K + k] * b->data[b_idx2 + k * N + j];
+                        sum += a->data[a_off + i * K + k]
+                             * b->data[b_off + k * N + j];
                     }
-                    out->data[c_idx2 + i * N + j] = sum;
+                    out->data[c_off + i * N + j] = sum;
                 }
             }
         }
-        free(batch_dims);
-        return out;
-    }
-
-    int out_dims[] = {M, N};
-    Tensor* out = tensor_create(out_dims, 2);
-
-    for (int i = 0; i < M; i++) {
-        for (int j = 0; j < N; j++) {
-            float sum = 0;
-            for (int k = 0; k < K; k++) {
-                sum += a->data[i * K + k] * b->data[k * N + j];
+    } else {
+        /* Simple 2D matrix multiply */
+        for (int i = 0; i < M; i++) {
+            for (int j = 0; j < N; j++) {
+                float sum = 0;
+                for (int k = 0; k < K; k++) {
+                    sum += a->data[i * K + k] * b->data[k * N + j];
+                }
+                out->data[i * N + j] = sum;
             }
-            out->data[i * N + j] = sum;
         }
     }
+
+    free(batch_dims);
     return out;
 }
 

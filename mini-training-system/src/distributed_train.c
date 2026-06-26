@@ -8,7 +8,6 @@
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 
 static int   ddp_initialized = 0;
-static float ring_scratch[DDP_RING_CHUNK_SIZE / sizeof(float)];
 
 void ddp_init(ddp_context_t* ctx, int argc, char** argv) {
     (void)argc; (void)argv;

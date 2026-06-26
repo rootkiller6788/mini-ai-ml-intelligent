@@ -203,13 +203,17 @@ void inception_free(InceptionModule *im) {
 }
 Tensor4D *inception_forward(const InceptionModule *im, const Tensor4D *in) {
     Tensor4D *b1 = conv2d_forward(im->conv1x1_a, in); relu_inplace(b1);
-    Tensor4D *tmp = conv2d_create(im->conv3x3->in_channels, im->conv3x3->in_channels, 1, 1, 0);
-    Tensor4D *b2r = conv2d_forward(tmp, in); relu_inplace(b2r);
-    conv2d_free(tmp);
+    /* 3x3 branch: 1x1 reduction then 3x3 */
+    Conv2D *reduce_3x3 = conv2d_create(im->conv3x3->in_channels,
+        im->conv3x3->in_channels, 1, 1, 0);
+    Tensor4D *b2r = conv2d_forward(reduce_3x3, in); relu_inplace(b2r);
+    conv2d_free(reduce_3x3);
     Tensor4D *b2 = conv2d_forward(im->conv3x3, b2r); relu_inplace(b2); tensor4d_free(b2r);
-    tmp = conv2d_create(im->conv5x5->in_channels, im->conv5x5->in_channels, 1, 1, 0);
-    Tensor4D *b3r = conv2d_forward(tmp, in); relu_inplace(b3r);
-    conv2d_free(tmp);
+    /* 5x5 branch: 1x1 reduction then 5x5 */
+    Conv2D *reduce_5x5 = conv2d_create(im->conv5x5->in_channels,
+        im->conv5x5->in_channels, 1, 1, 0);
+    Tensor4D *b3r = conv2d_forward(reduce_5x5, in); relu_inplace(b3r);
+    conv2d_free(reduce_5x5);
     Tensor4D *b3 = conv2d_forward(im->conv5x5, b3r); relu_inplace(b3); tensor4d_free(b3r);
     Tensor4D *p = pool2d_forward(im->pool_proj, in, 0);
     Tensor4D *b4 = conv2d_forward(im->conv1x1_b, p); relu_inplace(b4); tensor4d_free(p);

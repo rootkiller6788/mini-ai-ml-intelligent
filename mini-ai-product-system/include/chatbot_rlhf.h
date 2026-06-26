@@ -4,13 +4,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CB_MAX_SEQ_LEN      2048
-#define CB_VOCAB_SIZE       50257
-#define CB_HIDDEN_DIM       768
-#define CB_NUM_LAYERS       12
-#define CB_NUM_HEADS        12
-#define CB_MAX_PROMPT_LEN   1024
-#define CB_MAX_RESPONSE_LEN 512
+#define CB_MAX_SEQ_LEN      256
+#define CB_VOCAB_SIZE       256
+#define CB_HIDDEN_DIM       64
+#define CB_NUM_LAYERS       4
+#define CB_NUM_HEADS        4
+#define CB_MAX_PROMPT_LEN   128
+#define CB_MAX_RESPONSE_LEN 64
 
 typedef struct {
     float token_emb[CB_VOCAB_SIZE][CB_HIDDEN_DIM];

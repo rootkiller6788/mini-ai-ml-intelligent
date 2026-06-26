@@ -209,15 +209,115 @@ void mode_collapse_detect(const float *samples, int n_samples, int dim, float *d
     free(mean);
 }
 
+/*
+ * L7: DCGAN Generator (Radford et al., ICLR 2016)
+ * Architecture: FC -> reshape -> ConvTranspose -> BN -> ReLU -> ... -> Tanh
+ * Projects noise vector into image space via transposed convolutions.
+ * This simplified version uses a deep MLP as approximation.
+ */
 float *dcgan_gen_forward(const float *noise, int nz, int nc, int ngf) {
-    (void)nc; (void)ngf;
-    float *out = (float *)malloc(nz * sizeof(float));
-    for (int i = 0; i < nz; i++)
-        out[i] = tanhf(noise[i]);
+    /* DCGAN-like projection: noise -> hidden layers -> image
+     * Using 4-layer MLP with BatchNorm-like scaling to approximate
+     * the transposed convolution progression:
+     *   nz -> ngf*8 -> ngf*4 -> ngf*2 -> nc (output)
+     * Output is flattened [nc * 64 * 64] for square images. */
+    int img_sz = 64;
+    int out_dim = nc * img_sz * img_sz;
+    int h1 = ngf * 8, h2 = ngf * 4, h3 = ngf * 2;
+
+    float *l1 = (float *)calloc(h1, sizeof(float));
+    float *l2 = (float *)calloc(h2, sizeof(float));
+    float *l3 = (float *)calloc(h3, sizeof(float));
+    float *out = (float *)calloc(out_dim, sizeof(float));
+
+    /* Layer 1: noise -> ngf*8 with BatchNorm-style scaling */
+    for (int i = 0; i < h1; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < nz; j++)
+            sum += noise[j] * ((float)((i * 7 + j * 13 + 1) % 1000) / 1000.0f - 0.5f);
+        /* Scale to approximate batchnorm output range */
+        float mean_sq = sum * sum / (float)nz;
+        l1[i] = sum / sqrtf(mean_sq + 0.001f);
+        if (l1[i] < 0.0f) l1[i] = 0.0f;  /* ReLU */
+    }
+
+    /* Layer 2: ngf*8 -> ngf*4 */
+    for (int i = 0; i < h2; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < h1; j++)
+            sum += l1[j] * ((float)((i * 11 + j * 3 + 2) % 1000) / 1000.0f - 0.5f);
+        float mean_sq = sum * sum / (float)h1;
+        l2[i] = sum / sqrtf(mean_sq + 0.001f);
+        if (l2[i] < 0.0f) l2[i] = 0.0f;  /* ReLU */
+    }
+
+    /* Layer 3: ngf*4 -> ngf*2 */
+    for (int i = 0; i < h3; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < h2; j++)
+            sum += l2[j] * ((float)((i * 5 + j * 17 + 3) % 1000) / 1000.0f - 0.5f);
+        float mean_sq = sum * sum / (float)h2;
+        l3[i] = sum / sqrtf(mean_sq + 0.001f);
+        if (l3[i] < 0.0f) l3[i] = 0.0f;  /* ReLU */
+    }
+
+    /* Layer 4: ngf*2 -> out_dim (Tanh output for [-1,1] pixel range) */
+    for (int i = 0; i < out_dim; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < h3; j++)
+            sum += l3[j] * ((float)((i * 3 + j * 19 + 5) % 1000) / 1000.0f - 0.5f);
+        out[i] = tanhf(sum);
+    }
+
+    free(l1); free(l2); free(l3);
     return out;
 }
 
+/*
+ * L7: DCGAN Discriminator (Radford et al., ICLR 2016)
+ * Architecture: Conv2d -> LeakyReLU -> ... -> Sigmoid
+ * Classifies images as real/fake.
+ * Simplified: 4-layer MLP with LeakyReLU.
+ */
 float *dcgan_disc_forward(const float *x, int nc, int ndf) {
-    (void)nc; (void)ndf;
-    return NULL;
+    int img_sz = 64;
+    int in_dim = nc * img_sz * img_sz;
+    int h1 = ndf * 2, h2 = ndf * 4, h3 = ndf * 8;
+    float *l1 = (float *)calloc(h1, sizeof(float));
+    float *l2 = (float *)calloc(h2, sizeof(float));
+    float *l3 = (float *)calloc(h3, sizeof(float));
+    float *out = (float *)calloc(1, sizeof(float));
+
+    /* Layer 1: input -> ndf*2, LeakyReLU(0.2) */
+    for (int i = 0; i < h1; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < in_dim; j++)
+            sum += x[j] * ((float)((i * 13 + j * 7 + 8) % 1000) / 1000.0f - 0.5f);
+        l1[i] = (sum > 0.0f) ? sum : 0.2f * sum;  /* LeakyReLU */
+    }
+
+    /* Layer 2: ndf*2 -> ndf*4, LeakyReLU(0.2) */
+    for (int i = 0; i < h2; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < h1; j++)
+            sum += l1[j] * ((float)((i * 17 + j * 11 + 13) % 1000) / 1000.0f - 0.5f);
+        l2[i] = (sum > 0.0f) ? sum : 0.2f * sum;
+    }
+
+    /* Layer 3: ndf*4 -> ndf*8, LeakyReLU(0.2) */
+    for (int i = 0; i < h3; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < h2; j++)
+            sum += l2[j] * ((float)((i * 19 + j * 23 + 21) % 1000) / 1000.0f - 0.5f);
+        l3[i] = (sum > 0.0f) ? sum : 0.2f * sum;
+    }
+
+    /* Layer 4: ndf*8 -> 1, Sigmoid output */
+    float sum = 0.0f;
+    for (int j = 0; j < h3; j++)
+        sum += l3[j] * ((float)((j * 29 + 31) % 1000) / 1000.0f - 0.5f);
+    out[0] = 1.0f / (1.0f + expf(-sum));  /* Sigmoid */
+
+    free(l1); free(l2); free(l3);
+    return out;
 }

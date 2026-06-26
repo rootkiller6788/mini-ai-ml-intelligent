@@ -5,14 +5,14 @@
 #include <stdint.h>
 #include <time.h>
 
-#define CC_MAX_FILES          128
-#define CC_MAX_FILE_PATH      512
-#define CC_MAX_FILE_CONTENT   (64 * 1024)
-#define CC_MAX_LINES          4096
-#define CC_MAX_PROMPT_LEN     (32 * 1024)
-#define CC_MAX_COMPLETION     4096
-#define CC_MAX_IMPORTS        256
-#define CC_MAX_SNIPPET_LEN    2048
+#define CC_MAX_FILES          32
+#define CC_MAX_FILE_PATH      256
+#define CC_MAX_FILE_CONTENT   (8 * 1024)
+#define CC_MAX_LINES          1024
+#define CC_MAX_PROMPT_LEN     (4 * 1024)
+#define CC_MAX_COMPLETION     2048
+#define CC_MAX_IMPORTS        16
+#define CC_MAX_SNIPPET_LEN    1024
 
 typedef struct {
     char   path[CC_MAX_FILE_PATH];

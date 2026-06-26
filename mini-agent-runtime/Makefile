@@ -9,7 +9,7 @@ OBJDIR = build
 LIBDIR = build
 BINDIR = build
 
-_SRCS = react_agent.c tool_use.c planning_system.c agent_memory.c multi_agent.c
+_SRCS = react_agent.c tool_use.c planning_system.c agent_memory.c multi_agent.c agent_metrics.c agent_safety.c
 SRCS = $(_SRCS:%=$(SRCDIR)/%)
 
 _OBJS = $(_SRCS:.c=.o)
@@ -23,7 +23,7 @@ DEMOS = $(_DEMOS:%=$(BINDIR)/%)
 
 LIBRARY = $(LIBDIR)/libminiruntime.a
 
-.PHONY: all lib examples demos clean
+.PHONY: all lib examples demos test clean
 
 all: lib examples demos
 
@@ -60,6 +60,13 @@ $(BINDIR)/demo_memory: demo/demo_memory.c $(LIBRARY)
 $(BINDIR)/demo_multi_agent: demo/demo_multi_agent.c $(LIBRARY)
 	@mkdir -p "$(BINDIR)"
 	$(CC) $(CFLAGS) $< -L$(LIBDIR) -lminiruntime $(LDFLAGS) -o $@
+
+test: lib
+	@mkdir -p "$(BINDIR)"
+	$(CC) $(CFLAGS) tests/test_core.c -L$(LIBDIR) -lminiruntime $(LDFLAGS) -o $(BINDIR)/test_core
+	@echo "=== Running tests ==="
+	@$(BINDIR)/test_core
+	@echo "=== All tests passed ==="
 
 clean:
 	rm -rf "$(OBJDIR)" "$(LIBDIR)" "$(BINDIR)"

@@ -56,7 +56,7 @@ int main(void) {
     memset(&pair, 0, sizeof(pair));
     pair.prompt.input_len = len;
     memcpy(pair.prompt.input_ids, tokens, len * sizeof(int32_t));
-    memcpy(pair.chosen.input_ids, output.token_ids, output.length * sizeof(int32_t));
+    memcpy(pair.chosen.token_ids, output.token_ids, output.length * sizeof(int32_t));
     pair.chosen.length = output.length;
     pair.chosen.total_logprob = -1.0f;
     cb_reward_model_train(&rm2, &pair, 1, 0.001f, 1);

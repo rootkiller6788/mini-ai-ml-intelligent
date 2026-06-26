@@ -43,7 +43,8 @@ void      svm_fit_linear(SVMModel *m,
 int       svm_predict(const SVMModel *m, const double *x);
 
 /* ──────────────────────────────────────────────
-   SMO (Sequential Minimal Optimisation) – overview stub
+   SMO (Sequential Minimal Optimisation) — Platt 1998
+   Analytic 2-variable QP solver for SVM dual
    ────────────────────────────────────────────── */
 typedef struct {
     double *alpha;            /* Lagrange multipliers       */

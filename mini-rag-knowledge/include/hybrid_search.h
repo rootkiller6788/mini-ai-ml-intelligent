@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "embedding_retrieve.h"
 
 /* ──────────────────────────────────────────────
    Hybrid Search Configuration

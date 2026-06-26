@@ -111,6 +111,8 @@ float cross_encoder_score(const CrossEncoder *ce,
 void cross_encoder_rank(const CrossEncoder *ce,
                          const float *query_emb,
                          CandidatePool *pool) {
+    (void)ce;
+    (void)query_emb;
     for (size_t i = 0; i < pool->count; i++) {
         pool->candidates[i].final_score = 0.0f;
         pool->candidates[i].selected = false;

@@ -4,6 +4,10 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #define MAB_FLAGS_MAX 128
 
 static struct { char name[64]; int enabled; } mab_feature_flags[MAB_FLAGS_MAX];

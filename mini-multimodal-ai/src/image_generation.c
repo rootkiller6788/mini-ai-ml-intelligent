@@ -421,108 +421,127 @@ void mm_unet_free(mm_unet_t* unet) {
 void mm_unet_forward(const mm_unet_t* unet, const float* x, const float* timestep,
                      const float* context, int h, int w, int ctx_len, float* y) {
     int bc = unet->base_channels;
-    int n = h * w * bc;
-
-    float* t_emb = (float*)malloc((size_t)unet->time_embed_dim * sizeof(float));
-    mm_sinusoidal_embedding((int)(timestep[0] * 1000), unet->time_embed_dim, t_emb);
-
-    float temb_hidden[256] = {0};
     int ted = unet->time_embed_dim;
+
+    float* t_emb = (float*)malloc((size_t)ted * sizeof(float));
+    float* temb_hidden = (float*)calloc(256, sizeof(float));
+    mm_sinusoidal_embedding((int)(timestep[0] * 1000), ted, t_emb);
+    for (int o = 0; o < ted && o < 256; o++)
+        for (int i = 0; i < ted; i++)
+            temb_hidden[o] += t_emb[i] * unet->time_embed[0][i * ted + o];
     for (int o = 0; o < ted && o < 256; o++) {
-        for (int i = 0; i < ted; i++) temb_hidden[o] += t_emb[i] * unet->time_embed[0][i * ted + o];
-    }
-    for (int o = 0; o < ted && o < 256; o++) {
-        float val = temb_hidden[o];
-        temb_hidden[o] = 0.0f;
-        for (int i = 0; i < ted; i++) temb_hidden[o] += val * unet->time_embed[1][i * ted + o];
+        float val = temb_hidden[o]; temb_hidden[o] = 0.0f;
+        for (int i = 0; i < ted; i++)
+            temb_hidden[o] += val * unet->time_embed[1][i * ted + o];
     }
 
-    float* h_conv_in = (float*)calloc((size_t)n, sizeof(float));
-    mm_conv2d_forward(&unet->conv_in, x, h, w, h_conv_in);
+    int unet_max_ch = bc;
+    for (int i = 0; i < unet->num_down; i++) {
+        int ch = unet->down_blocks[i].ch_out;
+        if (ch > unet_max_ch) unet_max_ch = ch;
+    }
+    if (unet->mid_block.ch_out > unet_max_ch) unet_max_ch = unet->mid_block.ch_out;
+    for (int i = 0; i < unet->num_up; i++) {
+        int ch = unet->up_blocks[i].ch_out;
+        if (ch > unet_max_ch) unet_max_ch = ch;
+    }
+
+    int unet_nmax = h * w * unet_max_ch;
+    float* cur_feat = (float*)calloc((size_t)unet_nmax, sizeof(float));
+    mm_conv2d_forward(&unet->conv_in, x, h, w, cur_feat);
 
     typedef struct { float* feat; int h; int w; int c; } saved_t;
     saved_t saved[4];
-    float* h = h_conv_in;
-    int ch = h, cw = w;
-    int cc = bc;
+    int cfeat_h = h, cfeat_w = w, cfeat_c = bc;
 
+    /* ── Down blocks ── */
     for (int i = 0; i < unet->num_down; i++) {
         mm_unet_down_block_t* db = &unet->down_blocks[i];
-        for (int r = 0; r < db->num_res_blocks; r++) {
-            mm_resblock_forward(&db->res_blocks[r], h, temb_hidden, ch, cw, h);
-        }
+        for (int r = 0; r < db->num_res_blocks; r++)
+            mm_resblock_forward(&db->res_blocks[r], cur_feat, temb_hidden, cfeat_h, cfeat_w, cur_feat);
         if (db->attn_blocks) {
-            int n_el = ch * cw * db->ch_out;
+            int n_el = cfeat_h * cfeat_w * db->ch_out;
             float* temp = (float*)malloc((size_t)n_el * sizeof(float));
-            mm_spatial_transformer_forward(db->attn_blocks, h, context, ch, cw, ctx_len, temp);
-            memcpy(h, temp, (size_t)n_el * sizeof(float));
+            mm_spatial_transformer_forward(db->attn_blocks, cur_feat, context, cfeat_h, cfeat_w, ctx_len, temp);
+            memcpy(cur_feat, temp, (size_t)n_el * sizeof(float));
             free(temp);
         }
-        saved[i].feat = (float*)malloc((size_t)(ch * cw * db->ch_out) * sizeof(float));
-        memcpy(saved[i].feat, h, (size_t)(ch * cw * db->ch_out) * sizeof(float));
-        saved[i].h = ch; saved[i].w = cw; saved[i].c = db->ch_out;
-
+        saved[i].feat = (float*)malloc((size_t)(cfeat_h * cfeat_w * db->ch_out) * sizeof(float));
+        memcpy(saved[i].feat, cur_feat, (size_t)(cfeat_h * cfeat_w * db->ch_out) * sizeof(float));
+        saved[i].h = cfeat_h; saved[i].w = cfeat_w; saved[i].c = db->ch_out;
         if (db->has_downsampler) {
-            int nh_out = (ch + 1) / 2;
-            int nw_out = (cw + 1) / 2;
-            float* h_new = (float*)calloc((size_t)nh_out * nw_out * db->ch_out, sizeof(float));
-            mm_conv2d_forward(&db->downsampler, h, ch, cw, h_new);
-            free(h);
-            h = h_new; ch = nh_out; cw = nw_out; cc = db->ch_out;
+            int nh = (cfeat_h + 1) / 2, nw = (cfeat_w + 1) / 2;
+            float* fn = (float*)calloc((size_t)nh * nw * unet_max_ch, sizeof(float));
+            mm_conv2d_forward(&db->downsampler, cur_feat, cfeat_h, cfeat_w, fn);
+            free(cur_feat);
+            cur_feat = fn; cfeat_h = nh; cfeat_w = nw; cfeat_c = db->ch_out;
         }
     }
 
-    for (int r = 0; r < unet->mid_block.num_res_blocks; r++) {
-        mm_resblock_forward(&unet->mid_block.res_blocks[r], h, temb_hidden, ch, cw, h);
-    }
+    /* ── Mid block ── */
+    for (int r = 0; r < unet->mid_block.num_res_blocks; r++)
+        mm_resblock_forward(&unet->mid_block.res_blocks[r], cur_feat, temb_hidden, cfeat_h, cfeat_w, cur_feat);
     {
-        int n_el = ch * cw * unet->mid_block.ch_out;
+        int n_el = cfeat_h * cfeat_w * unet->mid_block.ch_out;
         float* temp = (float*)malloc((size_t)n_el * sizeof(float));
-        mm_spatial_transformer_forward(unet->mid_block.attn_blocks, h, context, ch, cw, ctx_len, temp);
-        memcpy(h, temp, (size_t)n_el * sizeof(float));
+        mm_spatial_transformer_forward(unet->mid_block.attn_blocks, cur_feat, context, cfeat_h, cfeat_w, ctx_len, temp);
+        memcpy(cur_feat, temp, (size_t)n_el * sizeof(float));
         free(temp);
     }
 
+    /* ── Up blocks ── */
     for (int i = 0; i < unet->num_up; i++) {
         mm_unet_up_block_t* ub = &unet->up_blocks[i];
         int si = unet->num_up - i - 1;
         saved_t* sv = &saved[si];
-
-        int concat_ch = cc + sv->c;
-        float* concat = (float*)malloc((size_t)ch * cw * concat_ch * sizeof(float));
-        for (int p = 0; p < ch * cw; p++) {
-            for (int d = 0; d < cc; d++) concat[p * concat_ch + d] = h[p * cc + d];
-            for (int d = 0; d < sv->c; d++) concat[p * concat_ch + cc + d] = sv->feat[p * sv->c + d];
+        int concat_ch = cfeat_c + sv->c;
+        float* concat = (float*)malloc((size_t)cfeat_h * cfeat_w * concat_ch * sizeof(float));
+        for (int p = 0; p < cfeat_h * cfeat_w; p++) {
+            int pc = p * cfeat_c, ps = p * sv->c, pt = p * concat_ch;
+            for (int d = 0; d < cfeat_c; d++) concat[pt + d] = cur_feat[pc + d];
+            for (int d = 0; d < sv->c; d++) concat[pt + cfeat_c + d] = sv->feat[ps + d];
         }
-        free(h);
-        h = concat; cc = concat_ch;
-
+        free(cur_feat);
+        cur_feat = concat; cfeat_c = concat_ch;
         for (int r = 0; r < ub->num_res_blocks; r++) {
-            mm_resblock_forward(&ub->res_blocks[r], h, temb_hidden, ch, cw, h);
-            cc = ub->ch_out;
+            mm_resblock_forward(&ub->res_blocks[r], cur_feat, temb_hidden, cfeat_h, cfeat_w, cur_feat);
+            cfeat_c = ub->ch_out;
         }
         if (ub->attn_blocks) {
-            int n_el = ch * cw * ub->ch_out;
+            int n_el = cfeat_h * cfeat_w * ub->ch_out;
             float* temp = (float*)malloc((size_t)n_el * sizeof(float));
-            mm_spatial_transformer_forward(ub->attn_blocks, h, context, ch, cw, ctx_len, temp);
-            memcpy(h, temp, (size_t)n_el * sizeof(float));
+            mm_spatial_transformer_forward(ub->attn_blocks, cur_feat, context, cfeat_h, cfeat_w, ctx_len, temp);
+            memcpy(cur_feat, temp, (size_t)n_el * sizeof(float));
             free(temp);
         }
         if (ub->has_upsampler) {
-            mm_conv2d_forward(&ub->upsampler, h, ch, cw, h);
+            int nh = cfeat_h * 2, nw = cfeat_w * 2;
+            float* up = (float*)calloc((size_t)nh * nw * unet_max_ch, sizeof(float));
+            for (int yy = 0; yy < cfeat_h; yy++) {
+                for (int xx = 0; xx < cfeat_w; xx++) {
+                    int src = (yy * cfeat_w + xx) * cfeat_c;
+                    int d00 = ((yy*2)*nw+(xx*2))*cfeat_c;
+                    int d01 = ((yy*2)*nw+(xx*2+1))*cfeat_c;
+                    int d10 = ((yy*2+1)*nw+(xx*2))*cfeat_c;
+                    int d11 = ((yy*2+1)*nw+(xx*2+1))*cfeat_c;
+                    for (int k = 0; k < cfeat_c; k++) {
+                        float v = cur_feat[src+k];
+                        up[d00+k]=v; up[d01+k]=v; up[d10+k]=v; up[d11+k]=v;
+                    }
+                }
+            }
+            free(cur_feat); cur_feat = up; cfeat_h = nh; cfeat_w = nw;
         }
     }
 
-    float* h_norm = (float*)malloc((size_t)(ch * cw * bc) * sizeof(float));
-    mm_groupnorm_forward(&unet->norm_out, h, ch, cw, h_norm);
-    mm_gelu_forward(h_norm, ch * cw * bc, h_norm);
-    mm_conv2d_forward(&unet->conv_out, h_norm, ch, cw, y);
-    free(h_norm);
+    /* ── Final ── */
+    float* h_norm = (float*)malloc((size_t)(cfeat_h * cfeat_w * bc) * sizeof(float));
+    mm_groupnorm_forward(&unet->norm_out, cur_feat, cfeat_h, cfeat_w, h_norm);
+    mm_gelu_forward(h_norm, cfeat_h * cfeat_w * bc, h_norm);
+    mm_conv2d_forward(&unet->conv_out, h_norm, cfeat_h, cfeat_w, y);
 
     for (int i = 0; i < unet->num_down; i++) free(saved[i].feat);
-    free(h);
-    free(t_emb);
-    free(h_conv_in);
+    free(cur_feat); free(h_norm); free(t_emb); free(temb_hidden);
 }
 
 void mm_sinusoidal_embedding(int t, int dim, float* emb) {
@@ -584,7 +603,10 @@ void mm_vae_encode(const mm_vae_t* vae, const float* image, int h, int w, int c,
     (void)c;
     int bc = vae->base_channels;
     int lh = h, lw = w;
-    int n_in = h * w * bc;
+    /* Compute max channels: resblocks may double channels each except the last */
+    int max_ch = bc;
+    for (int i = 0; i < vae->num_res_blocks - 1; i++) max_ch *= 2;
+    int n_in = h * w * max_ch;
     float* h_enc = (float*)calloc((size_t)n_in, sizeof(float));
     mm_conv2d_forward(&vae->encoder_conv_in, image, h, w, h_enc);
 
@@ -595,7 +617,7 @@ void mm_vae_encode(const mm_vae_t* vae, const float* image, int h, int w, int c,
             ch *= 2;
             int nlh = (lh + 1) / 2;
             int nlw = (lw + 1) / 2;
-            float* down = (float*)calloc((size_t)nlh * nlw * ch, sizeof(float));
+            float* down = (float*)calloc((size_t)nlh * nlw * max_ch, sizeof(float));
             float* temp_gelu = (float*)malloc((size_t)lh * lw * ch * sizeof(float));
             mm_gelu_forward(h_enc, lh * lw * ch, temp_gelu);
             for (int y = 0; y < nlh; y++) {
@@ -620,20 +642,28 @@ void mm_vae_encode(const mm_vae_t* vae, const float* image, int h, int w, int c,
 void mm_vae_decode(const mm_vae_t* vae, const float* latent, float* image,
                    int h, int w, int c) {
     (void)c;
-    int latent_dim = vae->latent_dim;
-    int lh = h / 8, lw = w / 8;
-    int ch = vae->base_channels;
+    (void)vae->latent_dim;  /* stored for inspection, shape derived from h/w */
 
-    int n_dec = lh * lw * ch;
+    /* Compute upsampling factor: decoder does (num_res_blocks-1) 2x upsamples */
+    int upsample_scale = 1 << (vae->num_res_blocks - 1);
+    int lh = h / upsample_scale, lw = w / upsample_scale;
+
+    /* Compute max channels for decoder (conv_in may have more than base_channels) */
+    int max_ch = vae->base_channels;
+    for (int i = 0; i < vae->num_res_blocks - 1; i++) max_ch *= 2;
+    /* decoder_conv_in out_ch = final encoder ch = max_ch */
+    if (max_ch < vae->base_channels * 2) max_ch = vae->base_channels * 2;
+    int n_dec = lh * lw * max_ch;
     float* h_dec = (float*)calloc((size_t)n_dec, sizeof(float));
     mm_conv2d_forward(&vae->decoder_conv_in, latent, lh, lw, h_dec);
 
+    int ch = vae->base_channels;  /* starting channel count for resblock input */
     for (int i = 0; i < vae->num_res_blocks; i++) {
         mm_resblock_forward(&vae->decoder_res_blocks[i], h_dec, NULL, lh, lw, h_dec);
         if (i < vae->num_res_blocks - 1) {
             int nlh = lh * 2;
             int nlw = lw * 2;
-            float* up = (float*)calloc((size_t)nlh * nlw * ch, sizeof(float));
+            float* up = (float*)calloc((size_t)nlh * nlw * max_ch, sizeof(float));
             float* temp_gelu = (float*)malloc((size_t)lh * lw * ch * sizeof(float));
             mm_gelu_forward(h_dec, lh * lw * ch, temp_gelu);
             for (int y = 0; y < lh; y++) {
@@ -669,7 +699,8 @@ void mm_vae_sample(const float* mean, const float* logvar, int n, float* latent)
 void mm_sd_init(mm_stable_diffusion_t* sd, int image_size, int latent_dim,
                 int base_channels, int num_res_blocks) {
     sd->image_size = image_size;
-    sd->latent_size = image_size / 8;
+    /* VAE downsampling: (num_res_blocks-1) 2x reductions */
+    sd->latent_size = image_size / (1 << (num_res_blocks - 1));
     sd->latent_channels = latent_dim;
     sd->num_timesteps = MM_SD_NUM_TIMESTEPS;
     sd->guidance_scale = 7.5f;
@@ -918,7 +949,8 @@ void mm_sd_inpaint(const mm_stable_diffusion_t* sd, const float* image,
 
 void mm_sd_pipe_encode(const mm_stable_diffusion_t* sd, const float* image,
                        int h, int w, int c, float* latent) {
-    float* logvar = (float*)malloc((size_t)(h / 8) * (w / 8) * sd->latent_channels * sizeof(float));
+    int scale = 1 << (sd->vae.num_res_blocks - 1);
+    float* logvar = (float*)malloc((size_t)(h / scale) * (w / scale) * sd->latent_channels * sizeof(float));
     mm_vae_encode(&sd->vae, image, h, w, c, latent, logvar);
     free(logvar);
 }

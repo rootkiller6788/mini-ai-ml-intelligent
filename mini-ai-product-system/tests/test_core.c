@@ -64,7 +64,7 @@ static int test_rec_ab_evaluate(void) {
 /* ── Chatbot RLHF Tests ── */
 static int test_cb_base_model_init(void) {
     TEST("cb_base_model_init");
-    CBBaseModel model;
+    static CBBaseModel model;
     cb_base_model_init(&model, 42);
     int32_t ids[] = {1, 2, 3};
     float hidden[3 * CB_HIDDEN_DIM];
@@ -87,7 +87,7 @@ static int test_cb_tokenize(void) {
 
 static int test_cb_reward_model_init(void) {
     TEST("cb_reward_model_init");
-    CBRewardModel rm;
+    static CBRewardModel rm;
     cb_reward_model_init(&rm, 42);
     int32_t prompt_ids[] = {1, 2};
     int32_t resp_ids[] = {3, 4, 5};

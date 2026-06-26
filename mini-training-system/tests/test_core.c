@@ -170,7 +170,7 @@ static int test_tl_init(void) {
     tl_context_t ctx;
     tl_init(&ctx, &train_cfg, &optim_cfg, &sched_cfg);
     CHECK(ctx.train_cfg.max_epochs == 10, "max_epochs wrong");
-    CHECK(ctx.model.global_step == 0, "global_step wrong");
+    CHECK(ctx.global_step == 0, "global_step wrong");
     tl_free(&ctx);
     PASS();
     return 0;

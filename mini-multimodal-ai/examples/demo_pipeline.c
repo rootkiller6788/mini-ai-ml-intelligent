@@ -134,17 +134,18 @@ static void run_sd_pipeline(pipe_registry_t* reg) {
     clock_t t0 = pipe_tick();
 
     mm_stable_diffusion_t* sd = (mm_stable_diffusion_t*)malloc(sizeof(mm_stable_diffusion_t));
-    mm_sd_init(sd, 128, 4, 32, 1);
+    int sd_blocks = 3;
+    mm_sd_init(sd, 128, 4, 32, sd_blocks);
     pipe_register(reg, "StableDiffusion", PIPE_SD, sd);
 
     printf("  Model: %dx%d images, latent=%dx%d, base_ch=%d\n",
-           128, 128, 16, 16, 32);
+           128, 128, sd->latent_size, sd->latent_size, 32);
 
     float* gen = (float*)malloc((size_t)128 * 128 * 3 * sizeof(float));
     float ctx[768] = {0};
     for (int i = 0; i < 768; i++) ctx[i] = ((float)rand() / (float)RAND_MAX - 0.5f) * 0.02f;
 
-    mm_sd_generate(sd, ctx, 768, 10, MM_SD_SAMPLER_DDIM, 128, 128, 3, gen);
+    mm_sd_generate(sd, ctx, 1, 10, MM_SD_SAMPLER_DDIM, 128, 128, 3, gen);
     printf("  Generated 128x128 image (DDIM, 10 steps)\n");
 
     float* mask = (float*)malloc((size_t)128 * 128 * 3 * sizeof(float));
@@ -154,16 +155,20 @@ static void run_sd_pipeline(pipe_registry_t* reg) {
         mask[i] = (px > 32 && px < 96 && py > 32 && py < 96) ? 1.0f : 0.0f;
     }
     float* inpainted = (float*)malloc((size_t)128 * 128 * 3 * sizeof(float));
-    mm_sd_inpaint(sd, gen, mask, ctx, 768, 128, 128, 3, 10, inpainted);
+    mm_sd_inpaint(sd, gen, mask, ctx, 1, 128, 128, 3, 10, inpainted);
     printf("  Inpainting completed (mask: center 64x64 region)\n");
 
+    int vae_blocks = 3;
     mm_vae_t* vae = (mm_vae_t*)malloc(sizeof(mm_vae_t));
-    mm_vae_init(vae, 4, 32, 1);
-    float* latent = (float*)malloc((size_t)16 * 16 * 4 * sizeof(float));
-    float* logvar = (float*)malloc((size_t)16 * 16 * 4 * sizeof(float));
+    mm_vae_init(vae, 4, 32, vae_blocks);
+    int vae_scl = 1 << (vae_blocks - 1);
+    int lat_sz = 128 / vae_scl;
+    int lat_n = lat_sz * lat_sz * 4;
+    float* latent = (float*)malloc((size_t)lat_n * sizeof(float));
+    float* logvar = (float*)malloc((size_t)lat_n * sizeof(float));
     mm_vae_encode(vae, test_image, 128, 128, 3, latent, logvar);
-    float* sampled = (float*)malloc((size_t)16 * 16 * 4 * sizeof(float));
-    mm_vae_sample(latent, logvar, 16 * 16 * 4, sampled);
+    float* sampled = (float*)malloc((size_t)lat_n * sizeof(float));
+    mm_vae_sample(latent, logvar, lat_n, sampled);
     float* reconstructed = (float*)malloc((size_t)128 * 128 * 3 * sizeof(float));
     mm_vae_decode(vae, sampled, reconstructed, 128, 128, 3);
     printf("  VAE encode-decode roundtrip completed\n");

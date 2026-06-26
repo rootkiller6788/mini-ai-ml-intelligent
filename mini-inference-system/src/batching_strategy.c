@@ -1,10 +1,10 @@
+#include <pthread.h>
 #include "batching_strategy.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
-#define _GNU_SOURCE
-#include <pthread.h>
 
 static double bs_get_time_ms(void) {
     struct timespec ts;
@@ -397,8 +397,49 @@ void bs_preempt_suspend(BS_BatchScheduler* sched, uint64_t request_id) {
     bs_running_remove(&sched->running, request_id);
 }
 
+/*
+ * bs_preempt_resume — Resume a previously suspended request (L3: state restore)
+ *
+ * Searches the wait queue for a suspended request by ID and re-submits it
+ * to the running batch if space is available. If the running batch is full,
+ * the request remains in the queue for the next iteration.
+ *
+ * State restoration preserves: input_ids, generated_len (progress),
+ * prefill_progress, and original priority. This enables fair scheduling
+ * under preemption — long-running requests aren't starved.
+ */
 void bs_preempt_resume(BS_BatchScheduler* sched, uint64_t request_id) {
-    (void)sched; (void)request_id;
+    if (!sched) return;
+    pthread_mutex_lock(&sched->queue.mutex);
+
+    /* Find suspended request in wait queue */
+    int found_idx = -1;
+    BS_Request* found_req = NULL;
+    for (int i = 0; i < sched->queue.count; i++) {
+        int idx = (sched->queue.head + i) % sched->queue.capacity;
+        if (sched->queue.items[idx] && sched->queue.items[idx]->id == request_id) {
+            found_idx = i;
+            found_req = sched->queue.items[idx];
+            break;
+        }
+    }
+
+    if (found_req && bs_running_count(&sched->running) < sched->max_batch_size) {
+        /* Remove from wait queue */
+        for (int j = found_idx; j < sched->queue.count - 1; j++) {
+            int from = (sched->queue.head + j + 1) % sched->queue.capacity;
+            int to   = (sched->queue.head + j) % sched->queue.capacity;
+            sched->queue.items[to] = sched->queue.items[from];
+        }
+        sched->queue.count--;
+
+        /* Restore to running batch with original priority */
+        found_req->in_batch = true;
+        found_req->batch_slot = sched->running.count;
+        bs_running_add(&sched->running, found_req);
+    }
+
+    pthread_mutex_unlock(&sched->queue.mutex);
 }
 
 BS_Request* bs_priority_next(BS_BatchScheduler* sched) {
@@ -491,10 +532,53 @@ BS_SchedulerConfig bs_config_default(void) {
     return cfg;
 }
 
+/*
+ * bs_config_load — Parse scheduler config from key=value file (L3: config I/O)
+ *
+ * Format: one key=value per line. Recognized keys:
+ *   model_name, bs_prefill, bs_decode, policy, max_running, max_delay_ms
+ * Policy values: 0=NO_PREEMPTION, 1=PRIORITY, 2=FAIR_SHARE, 3=SJF
+ */
 void bs_config_load(BS_SchedulerConfig* config, const char* path) {
-    (void)config; (void)path;
+    if (!config || !path) return;
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+
+    char line[256];
+    while (fgets(line, (int)sizeof(line), f)) {
+        char key[128] = {0}, value[128] = {0};
+        if (sscanf(line, "%127[^=]=%127s", key, value) != 2) continue;
+
+        if (strcmp(key, "model_name") == 0) {
+            config->model_name = strdup(value);
+        } else if (strcmp(key, "bs_prefill") == 0) {
+            config->bs_prefill = atoi(value);
+        } else if (strcmp(key, "bs_decode") == 0) {
+            config->bs_decode = atoi(value);
+        } else if (strcmp(key, "policy") == 0) {
+            config->policy = (BS_PreemptionPolicy)atoi(value);
+        } else if (strcmp(key, "max_running") == 0) {
+            config->max_running = atoi(value);
+        } else if (strcmp(key, "max_delay_ms") == 0) {
+            config->max_delay_ms = atof(value);
+        }
+    }
+    fclose(f);
 }
 
+/*
+ * bs_config_save — Write scheduler config to key=value file
+ */
 void bs_config_save(const BS_SchedulerConfig* config, const char* path) {
-    (void)config; (void)path;
+    if (!config || !path) return;
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "model_name=%s\n",
+            config->model_name ? config->model_name : "default");
+    fprintf(f, "bs_prefill=%d\n", config->bs_prefill);
+    fprintf(f, "bs_decode=%d\n", config->bs_decode);
+    fprintf(f, "policy=%d\n", (int)config->policy);
+    fprintf(f, "max_running=%d\n", config->max_running);
+    fprintf(f, "max_delay_ms=%.1f\n", config->max_delay_ms);
+    fclose(f);
 }

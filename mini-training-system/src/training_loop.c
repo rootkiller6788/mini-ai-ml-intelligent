@@ -171,10 +171,192 @@ float tl_compute_loss(tl_context_t* ctx, const float* output,
     return tl_cross_entropy(output, target, batch_size, classes);
 }
 
+/**
+ * tl_backward — Backpropagation through the entire model
+ *
+ * Theorem: Chain Rule (Leibniz Notation):
+ *   dL/dw_i = dL/df_n * df_n/df_{n-1} * ... * df_i/dw_i
+ *
+ * For cross-entropy with softmax (implicit in forward), the gradient of
+ * loss w.r.t. logits is simply (softmax(output) - target), avoiding the
+ * softmax Jacobian via the log-sum-exp trick.
+ *
+ * For ReLU layers: ∂ReLU(x)/∂x = 1 if x > 0 else 0.
+ * For linear layers: ∂(Wx + b)/∂W = x^T, ∂(Wx + b)/∂x = W^T.
+ *
+ * Time Complexity: O(L * B * d²) for L layers, batch B, dim d.
+ *
+ * Reference: Rumelhart, Hinton, Williams (1986) "Learning representations
+ *   by back-propagating errors" — Nature.
+ */
 void tl_backward(tl_context_t* ctx, const float* input,
                   const float* output, const float* target,
                   size_t batch_size) {
-    (void)ctx; (void)input; (void)output; (void)target; (void)batch_size;
+    if (!ctx || !output || !target || batch_size == 0) return;
+    if (ctx->model.num_layers == 0) return;
+
+    size_t classes = ctx->train_set.num_classes;
+    if (classes == 0) classes = 2;
+    size_t dim = ctx->train_set.feature_dim;
+    if (dim == 0) dim = 10;
+
+    /* Step 1: compute dL/dlogits = softmax(output) - target
+     * This is the gradient of cross-entropy loss w.r.t. final layer logits.
+     * Using the identity: ∂CE(softmax(z), y)/∂z = softmax(z) - y
+     */
+    size_t final_dim = classes;
+    /* find actual output dimension from last layer */
+    for (int l = ctx->model.num_layers - 1; l >= 0; l--) {
+        tl_layer_t* layer = &ctx->model.layers[l];
+        if (layer->biases) { final_dim = layer->num_biases; break; }
+    }
+
+    float* d_output = (float*)malloc(batch_size * final_dim * sizeof(float));
+    if (!d_output) return;
+
+    /* softmax gradient = softmax(logits) - target */
+    for (size_t b = 0; b < batch_size; b++) {
+        /* compute softmax for numerical stability */
+        float max_val = output[b * final_dim];
+        for (size_t c = 1; c < final_dim; c++)
+            if (output[b * final_dim + c] > max_val)
+                max_val = output[b * final_dim + c];
+        float sum_exp = 1e-8f;
+        for (size_t c = 0; c < final_dim; c++)
+            sum_exp += expf(output[b * final_dim + c] - max_val);
+        for (size_t c = 0; c < final_dim; c++) {
+            float prob = expf(output[b * final_dim + c] - max_val) / sum_exp;
+            d_output[b * final_dim + c] = (prob - target[b * final_dim + c]) / (float)batch_size;
+        }
+    }
+
+    /* Step 2: Backpropagate through hidden layers (reverse order)
+     * For each layer: compute dW, db, and d_input for the previous layer.
+     * We need to recompute activations since we don't cache them.
+     * For simplicity, we store weight gradients in a scratch buffer.
+     */
+    float* curr_delta = d_output;
+    size_t curr_dim = final_dim;
+
+    /* Recompute forward activations to get ReLU masks */
+    float** activations = (float**)malloc((size_t)(ctx->model.num_layers) * sizeof(float*));
+    if (!activations) { free(d_output); return; }
+
+    /* Forward pass to capture activations for gradient computation */
+    size_t fwd_dim = dim;
+    float* fwd_input = (float*)malloc(batch_size * fwd_dim * sizeof(float));
+    if (!fwd_input) { free(activations); free(d_output); return; }
+    memcpy(fwd_input, input, batch_size * fwd_dim * sizeof(float));
+
+    for (int l = 0; l < ctx->model.num_layers; l++) {
+        tl_layer_t* layer = &ctx->model.layers[l];
+        size_t out_dim = layer->biases ? layer->num_biases :
+                         (layer->num_weights / (fwd_dim > 0 ? fwd_dim : 1));
+        activations[l] = (float*)malloc(batch_size * out_dim * sizeof(float));
+        if (!activations[l]) {
+            for (int k = 0; k < l; k++) free(activations[k]);
+            free(activations); free(fwd_input); free(d_output); return;
+        }
+
+        /* Linear: out = W^T * in + b, then ReLU for non-final layers */
+        for (size_t b = 0; b < batch_size; b++) {
+            for (size_t o = 0; o < out_dim; o++) {
+                float sum = layer->biases ? layer->biases[o] : 0.0f;
+                for (size_t i = 0; i < fwd_dim; i++)
+                    sum += fwd_input[b * fwd_dim + i] * layer->weights[i * out_dim + o];
+                /* store pre-activation for gradient computation */
+                activations[l][b * out_dim + o] = sum;
+            }
+        }
+        /* Apply ReLU for non-final layers */
+        bool is_last = (l == ctx->model.num_layers - 1);
+        for (size_t b = 0; b < batch_size; b++) {
+            for (size_t o = 0; o < out_dim; o++) {
+                float val = activations[l][b * out_dim + o];
+                activations[l][b * out_dim + o] = is_last ? val : tl_relu(val);
+            }
+        }
+        free(fwd_input);
+        fwd_input = (float*)malloc(batch_size * out_dim * sizeof(float));
+        if (fwd_input) memcpy(fwd_input, activations[l], batch_size * out_dim * sizeof(float));
+        fwd_dim = out_dim;
+    }
+    free(fwd_input);
+
+    /* Backprop through layers in reverse order */
+    for (int l = ctx->model.num_layers - 1; l >= 0; l--) {
+        tl_layer_t* layer = &ctx->model.layers[l];
+        size_t in_dim = (l == 0) ? dim : 0;
+        /* Determine input dimension from previous layer */
+        if (l > 0) {
+            tl_layer_t* prev = &ctx->model.layers[l - 1];
+            in_dim = prev->biases ? prev->num_biases :
+                     prev->num_weights / (in_dim > 0 ? in_dim : 1);
+        }
+
+        size_t out_dim = layer->biases ? layer->num_biases :
+                         (layer->num_weights / (in_dim > 0 ? in_dim : 1));
+
+        /* Gradient through ReLU for non-final layers */
+        if (l < ctx->model.num_layers - 1) {
+            for (size_t b = 0; b < batch_size; b++) {
+                for (size_t o = 0; o < curr_dim && o < out_dim; o++) {
+                    /* pre-activation was stored before ReLU */
+                    curr_delta[b * curr_dim + o] *= tl_relu_back(
+                        activations[l] ? activations[l][b * out_dim + o] : 0.0f);
+                }
+            }
+        }
+
+        /* dW = input^T * delta  (outer product summed over batch) */
+        float* prev_act = (l == 0) ? (float*)input : activations[l - 1];
+        size_t prev_dim = in_dim;
+        if (prev_act) {
+            for (size_t i = 0; i < prev_dim && i < in_dim; i++) {
+                for (size_t o = 0; o < curr_dim && o < out_dim; o++) {
+                    float grad_w = 0.0f;
+                    for (size_t b = 0; b < batch_size; b++)
+                        grad_w += prev_act[b * prev_dim + i] * curr_delta[b * curr_dim + o];
+                    /* Apply weight update scaled by learning rate */
+                    size_t widx = i * out_dim + o;
+                    if (widx < layer->num_weights)
+                        layer->weights[widx] -= ctx->current_lr * grad_w;
+                }
+            }
+        }
+
+        /* db = sum(delta over batch) */
+        if (layer->biases) {
+            for (size_t o = 0; o < curr_dim && o < layer->num_biases; o++) {
+                float grad_b = 0.0f;
+                for (size_t b = 0; b < batch_size; b++)
+                    grad_b += curr_delta[b * curr_dim + o];
+                layer->biases[o] -= ctx->current_lr * grad_b;
+            }
+        }
+
+        /* d_input = W * delta for next iteration */
+        if (l > 0) {
+            float* next_delta = (float*)calloc(batch_size * in_dim, sizeof(float));
+            if (next_delta) {
+                for (size_t b = 0; b < batch_size; b++) {
+                    for (size_t i = 0; i < in_dim; i++) {
+                        for (size_t o = 0; o < curr_dim && o < out_dim; o++) {
+                            next_delta[b * in_dim + i] +=
+                                layer->weights[i * out_dim + o] * curr_delta[b * curr_dim + o];
+                        }
+                    }
+                }
+                free(curr_delta);
+                curr_delta = next_delta;
+            }
+            curr_dim = in_dim;
+        }
+    }
+
+    free(curr_delta);
+    for (int l = 0; l < ctx->model.num_layers; l++) free(activations[l]);
+    free(activations);
 }
 
 void tl_optimizer_step(tl_context_t* ctx) {

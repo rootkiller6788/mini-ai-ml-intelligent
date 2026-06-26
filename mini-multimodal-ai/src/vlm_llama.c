@@ -42,7 +42,13 @@ void mm_vlm_conversation_add(mm_vlm_conversation_t* conv, const char* text,
                              mm_vlm_msg_role_t role, int has_image) {
     if (conv->num_messages >= conv->max_messages) return;
     mm_vlm_message_t* msg = &conv->messages[conv->num_messages++];
-    msg->text = text ? _strdup(text) : NULL;
+    if (text) {
+        size_t len = strlen(text);
+        msg->text = (char*)malloc(len + 1);
+        if (msg->text) memcpy(msg->text, text, len + 1);
+    } else {
+        msg->text = NULL;
+    }
     msg->has_image = has_image;
     msg->image_features = NULL;
     msg->bboxes = NULL;
@@ -195,14 +201,16 @@ void mm_vlm_attention_forward(const mm_vlm_attention_t* attn, const float* x,
             free(scores);
         }
 
-        float final[4096] = {0};
+        float* final_out = (float*)calloc((size_t)dim, sizeof(float));
+        if (!final_out) break;
         for (int d = 0; d < dim; d++) {
-            final[d] = attn->proj_bias[d];
+            final_out[d] = attn->proj_bias[d];
             for (int i = 0; i < dim; i++) {
-                final[d] += attn_out[i] * attn->proj_weight[i * dim + d];
+                final_out[d] += attn_out[i] * attn->proj_weight[i * dim + d];
             }
         }
-        for (int d = 0; d < dim && d < 4096; d++) out[s * dim + d] = final[d];
+        for (int d = 0; d < dim; d++) out[s * dim + d] = final_out[d];
+        free(final_out);
         free(attn_out);
     }
 
@@ -224,12 +232,17 @@ void mm_vlm_ffn_free(mm_vlm_ffn_t* ffn) {
 }
 
 void mm_vlm_ffn_forward(const mm_vlm_ffn_t* ffn, const float* x, int seq_len, float* out) {
+    int hd = ffn->hidden_dim;
     for (int s = 0; s < seq_len; s++) {
-        float gate[1024] = {0}, up[1024] = {0}, hidden[1024] = {0};
+        float* gate = (float*)calloc((size_t)hd, sizeof(float));
+        float* up   = (float*)calloc((size_t)hd, sizeof(float));
+        float* hidden = (float*)calloc((size_t)hd, sizeof(float));
+        if (!gate || !up || !hidden) { free(gate); free(up); free(hidden); return; }
         mm_vlm_linear_forward(&ffn->gate_proj, x + s * ffn->dim, 1, ffn->dim, gate);
         mm_vlm_linear_forward(&ffn->up_proj, x + s * ffn->dim, 1, ffn->dim, up);
-        for (int i = 0; i < ffn->hidden_dim; i++) hidden[i] = up[i] * mm_vlm_silu(gate[i]);
-        mm_vlm_linear_forward(&ffn->down_proj, hidden, 1, ffn->hidden_dim, out + s * ffn->dim);
+        for (int i = 0; i < hd; i++) hidden[i] = up[i] * mm_vlm_silu(gate[i]);
+        mm_vlm_linear_forward(&ffn->down_proj, hidden, 1, hd, out + s * ffn->dim);
+        free(gate); free(up); free(hidden);
     }
 }
 
@@ -347,6 +360,7 @@ void mm_vlm_llm_forward(const mm_vlm_llm_t* llm, const float* x,
 
 void mm_vlm_sampler(const float* logits, int vocab_size, float temperature,
                     int top_k, float top_p, int* token) {
+    (void)top_p;  /* nucleus sampling threshold, reserved for future use */
     float max_logit = logits[0];
     for (int i = 1; i < vocab_size; i++) if (logits[i] > max_logit) max_logit = logits[i];
 
@@ -472,6 +486,7 @@ int mm_vlm_generate_token(const mm_vlm_model_t* model, const int* input_ids,
                           int seq_len, int pos) {
     int dim = model->llm_dim;
     (void)seq_len;
+    (void)input_ids;
 
     float x[4096] = {0};
     for (int d = 0; d < dim; d++) {
@@ -487,6 +502,7 @@ int mm_vlm_generate_token(const mm_vlm_model_t* model, const int* input_ids,
 void mm_vlm_generate(const mm_vlm_model_t* model, const int* input_ids,
                      int seq_len, int max_new_tokens,
                      int* output_ids, int* num_output) {
+    (void)input_ids;  /* pre-encoded token IDs, already embedded in h */
     *num_output = 0;
     int dim = model->llm_dim;
 
@@ -497,15 +513,17 @@ void mm_vlm_generate(const mm_vlm_model_t* model, const int* input_ids,
         }
     }
 
+    float* logits_buf = (float*)calloc((size_t)model->llm.vocab_size, sizeof(float));
+    if (!logits_buf) { free(h); return; }
     for (int t = 0; t < max_new_tokens; t++) {
-        float logits[32000] = {0};
         int token;
         int cur_len = seq_len + t;
-        mm_vlm_llm_forward(&model->llm, h, cur_len, 0, logits, &token);
+        mm_vlm_llm_forward(&model->llm, h, cur_len, 0, logits_buf, &token);
         output_ids[(*num_output)++] = token;
 
         if (token == 2) break;
     }
+    free(logits_buf);
 
     free(h);
 }

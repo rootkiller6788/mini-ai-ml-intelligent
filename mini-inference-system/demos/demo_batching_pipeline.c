@@ -1,3 +1,4 @@
+#include <pthread.h>
 #include "batching_strategy.h"
 #include "model_serving.h"
 #include "kv_cache.h"

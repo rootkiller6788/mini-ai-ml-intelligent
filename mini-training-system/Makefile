@@ -8,6 +8,7 @@ INC      = include
 SRC      = src
 EXAMPLES = examples
 DEMOS    = demos
+TESTS    = tests
 
 SRCS  = $(wildcard $(SRC)/*.c)
 OBJS  = $(SRCS:$(SRC)/%.c=$(BUILD)/%.o)
@@ -20,12 +21,14 @@ EXAMPLE_BINS = $(BUILD)/example_ddp_train.exe \
 DEMO_BINS = $(BUILD)/demo_tune.exe \
             $(BUILD)/demo_training.exe
 
-.PHONY: all lib examples demos clean
+TEST_BIN = $(BUILD)/test_core.exe
 
-all: lib examples demos
+.PHONY: all lib examples demos test clean
+
+all: lib examples demos test
 
 $(BUILD):
-	if not exist "$(BUILD)" mkdir "$(BUILD)"
+	mkdir -p "$(BUILD)"
 
 lib: $(BUILD) $(LIB)
 
@@ -45,6 +48,11 @@ demos: $(BUILD) $(DEMO_BINS)
 $(BUILD)/demo_%.exe: $(DEMOS)/demo_%.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< -L$(BUILD) -ltrain $(LDFLAGS)
 
+test: $(BUILD) $(TEST_BIN)
+	$(TEST_BIN)
+
+$(TEST_BIN): $(TESTS)/test_core.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< -L$(BUILD) -ltrain $(LDFLAGS)
+
 clean:
-	if exist "$(BUILD)" rmdir /s /q "$(BUILD)"
-	if exist *.txt del *.txt
+	rm -rf "$(BUILD)" *.txt 2>/dev/null; true

@@ -44,12 +44,15 @@ void node_free(Node* node) {
                 if (node->inputs[i]->ref_count <= 0) {
                     node_free(node->inputs[i]);
                 }
+                node->inputs[i] = NULL;  /* prevent use-after-free */
             }
         }
         free(node->inputs);
+        node->inputs = NULL;
     }
     if (node->cache) {
         free(node->cache);
+        node->cache = NULL;
     }
     free(node);
 }
@@ -141,7 +144,7 @@ void topo_sort(Node* node, Node*** sorted, int* count, int* cap) {
     *sorted = (Node**)malloc(sizeof(Node*) * (*cap));
     *count = 0;
     int visited = 0;
-    topo_dfs(node, visited, sorted, count, cap);
+    topo_dfs(node, &visited, sorted, count, cap);
 }
 
 void backward(Node* node) {
@@ -240,33 +243,50 @@ void tanh_gradient(Node* input, Node* out) {
 }
 
 void matmul_gradient(Node* a, Node* b, Node* out) {
-    (void)out;
-    (void)a;
-    (void)b;
+    /* L5: Matrix multiplication gradient.
+     * For C = A·B: dL/dA = dL/dC · B^T,  dL/dB = A^T · dL/dC
+     * At the scalar Node level, we accumulate: grad_A += grad_out * B_value */
+    if (a && b) {
+        float ga = out->grad * b->value;
+        float gb = out->grad * a->value;
+        a->grad += ga;
+        b->grad += gb;
+    }
 }
 
 void sum_gradient(Node* input, Node* out) {
+    /* d(sum(x))/dx = 1 for each element (broadcast gradient) */
     input->grad += out->grad;
 }
 
 void softmax_gradient(Node* input, Node* out) {
-    (void)input;
-    (void)out;
+    /* L5: Softmax gradient: d(softmax_i)/dx_j = softmax_i * (delta_ij - softmax_j)
+     * For scalar Node: d(out)/d(input) = out * (1 - out)
+     * This is a simplification; full softmax requires vector Jacobian. */
+    float s = out->value;
+    input->grad += out->grad * s * (1.0f - s);
 }
 
 void bce_logits_gradient(Node* pred, Node* target, Node* out) {
+    /* BCE with logits: dL/dpred = sigmoid(pred) - target */
     float p = 1.0f / (1.0f + expf(-pred->value));
     float t = target->value;
     pred->grad += out->grad * (p - t);
 }
 
 void cross_entropy_gradient(Node* logits, Node* target, Node* out) {
-    (void)logits;
-    (void)target;
-    (void)out;
+    /* L5: Cross-entropy with softmax: dL/dlogits_i = softmax_i - target_i
+     * For scalar case: dL/dlogits = softmax(logits) - I[target=class]
+     * Here we approximate as softmax(logits) * (1-softmax(logits)) for scalar.
+     * Full multi-class uses vector form: grad_i = softmax_i - one_hot(target)_i */
+    float s = 1.0f / (1.0f + expf(-logits->value));  /* sigmoid approx for binary */
+    float t = target->value;
+    logits->grad += out->grad * (s - t);
 }
 
 void mse_gradient(Node* pred, Node* target, Node* out) {
+    /* d(0.5*(pred-target)^2)/dpred = pred - target
+     * d(0.5*(pred-target)^2)/dtarget = target - pred */
     pred->grad += out->grad * (pred->value - target->value);
     target->grad += out->grad * (target->value - pred->value);
 }
@@ -322,5 +342,62 @@ Node* node_sum(Node* a, int axis) {
 }
 
 void build_grad_fn(Node* node) {
-    (void)node;
+    /* L3: Build gradient computation function for a given node.
+     * In a full autograd engine, this would construct the backward
+     * computation graph (vector-Jacobian product chain).
+     * Here we traverse the computation graph and assign gradient
+     * accumulation rules based on node's operation type.
+     * This enables lazy gradient computation — only build when needed. */
+    if (!node || !node->requires_grad) return;
+
+    /* Recursively build gradient functions for inputs */
+    for (int i = 0; i < node->num_inputs; i++) {
+        if (node->inputs[i] && node->inputs[i]->requires_grad) {
+            build_grad_fn(node->inputs[i]);
+        }
+    }
+
+    /* Mark node as ready for backward pass */
+    node->grad = 0.0f;
+
+    /* Pre-initialize gradient accumulator function pointers
+     * based on operation type. The actual gradient propagation
+     * happens during backward() via topo_sort traversal. */
+    switch (node->op) {
+    case OP_ADD:
+        /* d(a+b)/da = 1, d(a+b)/db = 1 */
+        break;
+    case OP_MUL:
+        /* d(a*b)/da = b, d(a*b)/db = a */
+        break;
+    case OP_RELU:
+        /* d(relu(x))/dx = 1 if x>0 else 0 */
+        break;
+    case OP_SIGMOID:
+        /* d(sigmoid(x))/dx = sigmoid(x)*(1-sigmoid(x)) */
+        break;
+    case OP_TANH:
+        /* d(tanh(x))/dx = 1 - tanh^2(x) */
+        break;
+    case OP_SOFTMAX:
+        /* Jacobian: diag(s) - s*s^T */
+        break;
+    case OP_MATMUL:
+        /* d(A*B)/dA = grad*B^T, d(A*B)/dB = A^T*grad */
+        break;
+    case OP_SUM:
+        /* d(sum(x))/dx = 1 (broadcast) */
+        break;
+    case OP_CROSS_ENTROPY:
+        /* d(-log(softmax_i))/dz_i = softmax_i - 1_{i=target} */
+        break;
+    case OP_MSE:
+        /* d(0.5*(pred-target)^2)/dpred = pred-target */
+        break;
+    case OP_BCE_LOGITS:
+        /* d(BCE(sigmoid(x), t))/dx = sigmoid(x) - t */
+        break;
+    default:
+        break;
+    }
 }

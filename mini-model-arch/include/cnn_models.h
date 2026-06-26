@@ -40,9 +40,10 @@ typedef struct {
 } VGGBlock;
 
 typedef struct {
-    Conv2D *conv1, *conv2;
+    Conv2D *conv1, *conv2, *conv3;
     Conv2D *shortcut;
     int     use_projection;
+    int     bottleneck;
 } ResBlock;
 
 typedef struct {

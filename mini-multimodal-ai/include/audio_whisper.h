@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "clip_contrastive.h"
+#include "image_generation.h"
 
 #ifdef __cplusplus
 extern "C" {

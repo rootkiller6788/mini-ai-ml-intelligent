@@ -171,3 +171,95 @@ float *birnn_forward(const BiRNN *b, const float *x, float *h_fw, float *h_bw, i
     }
     return out;
 }
+
+/*
+ * L3: Stacked RNN — multiple RNN/LSTM/GRU layers stacked sequentially.
+ * Each layer output feeds into the next layer as input.
+ * Deep RNNs capture hierarchical temporal features (Graves, 2013).
+ */
+StackedRNN *stacked_rnn_create(int in_sz, int hid_sz, int layers, int cell_type) {
+    StackedRNN *s = (StackedRNN *)malloc(sizeof(StackedRNN));
+    s->num_layers = layers;
+    s->cell_type = cell_type;
+    s->cells = (void **)malloc(layers * sizeof(void *));
+
+    int cur_in = in_sz;
+    for (int l = 0; l < layers; l++) {
+        if (cell_type == 0) {
+            s->cells[l] = (void *)rnn_cell_create(cur_in, hid_sz);
+        } else if (cell_type == 1) {
+            s->cells[l] = (void *)lstm_cell_create(cur_in, hid_sz);
+        } else {
+            s->cells[l] = (void *)gru_cell_create(cur_in, hid_sz);
+        }
+        cur_in = hid_sz;
+    }
+    return s;
+}
+
+void stacked_rnn_free(StackedRNN *s) {
+    for (int l = 0; l < s->num_layers; l++) {
+        if (s->cell_type == 0) rnn_cell_free((RNNCell *)s->cells[l]);
+        else if (s->cell_type == 1) lstm_cell_free((LSTMCell *)s->cells[l]);
+        else gru_cell_free((GRUCell *)s->cells[l]);
+    }
+    free(s->cells);
+    free(s);
+}
+
+void stacked_rnn_forward(const StackedRNN *s, const float *x, float *h, int steps) {
+    int hid_sz = 0, in_sz = 0;
+    if (s->cell_type == 0) {
+        hid_sz = ((RNNCell *)s->cells[0])->hidden_size;
+        in_sz  = ((RNNCell *)s->cells[0])->input_size;
+    } else if (s->cell_type == 1) {
+        hid_sz = ((LSTMCell *)s->cells[0])->hidden_size;
+        in_sz  = ((LSTMCell *)s->cells[0])->input_size;
+    } else {
+        hid_sz = ((GRUCell *)s->cells[0])->hidden_size;
+        in_sz  = ((GRUCell *)s->cells[0])->input_size;
+    }
+
+    /* Allocate enough space for the largest layer's input */
+    int max_input_sz = (in_sz > hid_sz) ? in_sz : hid_sz;
+    float *layer_input = (float *)malloc(steps * max_input_sz * sizeof(float));
+    memcpy(layer_input, x, steps * in_sz * sizeof(float));
+    float *layer_hidden = (float *)calloc(hid_sz, sizeof(float));
+    float *layer_cell   = (float *)calloc(hid_sz, sizeof(float));
+
+    for (int l = 0; l < s->num_layers; l++) {
+        float *layer_output = NULL;
+        int cur_input_sz = (l == 0) ? in_sz : hid_sz;
+
+        memset(layer_hidden, 0, hid_sz * sizeof(float));
+        memset(layer_cell, 0, hid_sz * sizeof(float));
+
+        if (s->cell_type == 0) {
+            layer_output = rnn_cell_forward(
+                (RNNCell *)s->cells[l], layer_input, layer_hidden, steps);
+        } else if (s->cell_type == 1) {
+            lstm_cell_forward(
+                (LSTMCell *)s->cells[l], layer_input, layer_hidden, layer_cell, steps);
+            layer_output = (float *)malloc(steps * hid_sz * sizeof(float));
+            for (int t = 0; t < steps; t++)
+                memcpy(layer_output + t * hid_sz, layer_hidden, hid_sz * sizeof(float));
+        } else {
+            gru_cell_forward(
+                (GRUCell *)s->cells[l], layer_input, layer_hidden, steps);
+            layer_output = (float *)malloc(steps * hid_sz * sizeof(float));
+            for (int t = 0; t < steps; t++)
+                memcpy(layer_output + t * hid_sz, layer_hidden, hid_sz * sizeof(float));
+        }
+
+        if (l < s->num_layers - 1) {
+            memcpy(layer_input, layer_output, steps * hid_sz * sizeof(float));
+            free(layer_output);
+        } else {
+            memcpy(h, layer_hidden, hid_sz * sizeof(float));
+            free(layer_output);
+        }
+    }
+    free(layer_input);
+    free(layer_hidden);
+    free(layer_cell);
+}

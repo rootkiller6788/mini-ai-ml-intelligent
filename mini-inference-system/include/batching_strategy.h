@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
 #define BS_MAX_BATCH_SIZE        512
 #define BS_MAX_SEQ_LEN           32768

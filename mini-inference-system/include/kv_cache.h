@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #define KVC_MAX_BATCH_SIZE     256
 #define KVC_MAX_SEQ_LEN        32768

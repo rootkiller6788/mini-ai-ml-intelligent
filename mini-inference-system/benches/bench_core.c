@@ -4,6 +4,7 @@
  * Benchmarks: model serving, INT8 quantization, KV cache,
  *             speculative decoding, batching strategies.
  */
+#include <pthread.h>
 #include "../include/model_serving.h"
 #include "../include/quantization_int8.h"
 #include "../include/kv_cache.h"

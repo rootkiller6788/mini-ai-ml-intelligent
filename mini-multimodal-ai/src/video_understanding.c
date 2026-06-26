@@ -478,7 +478,7 @@ void mm_timesformer_forward(const mm_timesformer_t* tsf, const mm_video_clip_t* 
     int np = tsf->num_patches;
     int dim = tsf->embed_dim;
     int total_tokens = nf * np;
-    int patch_dim = ps * ps * 3;
+    (void)(ps * ps * 3); /* patch_dim = patch_size^2 * channels, used in embedding loop */
 
     float* tokens = (float*)calloc((size_t)total_tokens * dim, sizeof(float));
 

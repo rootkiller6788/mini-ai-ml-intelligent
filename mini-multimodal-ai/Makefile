@@ -1,49 +1,66 @@
 CC       = gcc
-CFLAGS   = -std=c99 -Wall -Wextra -O3 -march=native -fopenmp
-LDFLAGS  = -lm -fopenmp
+CFLAGS   = -std=c99 -Wall -Wextra -O3 -march=native -Iinclude
+LDFLAGS  = -lm
 AR       = ar rcs
 
-SRCS     = clip_contrastive.c image_generation.c vlm_llama.c audio_whisper.c video_understanding.c
-OBJS     = $(SRCS:.c=.o)
-HEADERS  = clip_contrastive.h image_generation.h vlm_llama.h audio_whisper.h video_understanding.h
+OBJS     = clip_contrastive.o image_generation.o vlm_llama.o \
+           audio_whisper.o video_understanding.o
+HEADERS  = include/clip_contrastive.h include/image_generation.h include/vlm_llama.h \
+           include/audio_whisper.h include/video_understanding.h
 LIB      = libmultimodal.a
 
-EXAMPLES = example_clip example_sd example_llava
-DEMOS    = demo_multimodal demo_pipeline
-TARGETS  = $(EXAMPLES) $(DEMOS)
+TARGETS  = example_clip example_sd example_llava test_core
 
 .PHONY: all clean test
 
-all: $(LIB) $(TARGETS)
+all: $(LIB) $(TARGETS) demo_multimodal demo_pipeline
 
 $(LIB): $(OBJS)
 	$(AR) $@ $^
 
-%.o: %.c $(HEADERS)
+clip_contrastive.o: src/clip_contrastive.c $(HEADERS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-example_clip: example_clip.c $(LIB)
+image_generation.o: src/image_generation.c $(HEADERS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+vlm_llama.o: src/vlm_llama.c $(HEADERS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+audio_whisper.o: src/audio_whisper.c $(HEADERS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+video_understanding.o: src/video_understanding.c $(HEADERS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+example_clip: examples/example_clip.c $(LIB) $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
-example_sd: example_sd.c $(LIB)
+example_sd: examples/example_sd.c $(LIB) $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
-example_llava: example_llava.c $(LIB)
+example_llava: examples/example_llava.c $(LIB) $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
-demo_multimodal: demo_multimodal.c $(LIB)
+demo_multimodal: examples/demo_multimodal.c $(LIB) $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
-demo_pipeline: demo_pipeline.c $(LIB)
+demo_pipeline: examples/demo_pipeline.c $(LIB) $(HEADERS)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
-test: $(EXAMPLES)
-	@echo "=== Running CLIP Zero-shot Example ==="
+test_core: tests/test_core.c $(LIB) $(HEADERS)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+
+test: $(TARGETS)
+	@printf "=== Running Unit Tests ===\n"
+	./test_core
+	@printf "\n=== Running CLIP Example ===\n"
 	./example_clip
-	@echo "=== Running Stable Diffusion Example ==="
+	@printf "\n=== Running Stable Diffusion Example ===\n"
 	./example_sd
-	@echo "=== Running LLaVA Example ==="
+	@printf "\n=== Running LLaVA Example ===\n"
 	./example_llava
+	@printf "\n=== All Tests Passed ===\n"
 
 clean:
-	del /Q $(OBJS) $(LIB) $(TARGETS) 2>nul || rm -f $(OBJS) $(LIB) $(TARGETS)
+	-rm -f $(OBJS) $(LIB) $(TARGETS) demo_multimodal demo_pipeline demo_multimodal.exe demo_pipeline.exe test_core.exe example_clip.exe example_sd.exe example_llava.exe

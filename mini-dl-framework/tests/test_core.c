@@ -42,8 +42,9 @@ static int test_node_add_mul(void) {
     Node *prod = node_mul(a, b);
     CHECK(prod != NULL, "mul failed");
     CHECK(fabsf(prod->value - 6.0f) < 0.01f, "mul value wrong");
-    node_free(a); node_free(b);
-    node_free(sum); node_free(prod);
+    /* Free only the output nodes; inputs freed via ref_count cascade */
+    node_free(prod);
+    node_free(sum);
     PASS();
     return 0;
 }
@@ -53,11 +54,12 @@ static int test_node_relu(void) {
     Node *a = node_create(-1.0f, true);
     Node *r = node_relu(a);
     CHECK(fabsf(r->value - 0.0f) < 0.01f, "relu(-1) != 0");
-    node_free(a); node_free(r);
+    /* r holds ref to a; freeing r cascades to a via ref_count */
+    node_free(r);
     a = node_create(2.0f, true);
     r = node_relu(a);
     CHECK(fabsf(r->value - 2.0f) < 0.01f, "relu(2) != 2");
-    node_free(a); node_free(r);
+    node_free(r);
     PASS();
     return 0;
 }

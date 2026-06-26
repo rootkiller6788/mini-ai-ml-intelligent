@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -110,9 +111,6 @@ typedef struct {
     tl_layer_t layers[TL_MAX_LAYERS];
     int num_layers;
     int current_epoch;
-    int global_step;
-    float current_lr;
-    float best_val_loss;
     float best_val_metric;
 } tl_model_t;
 
@@ -161,6 +159,9 @@ typedef struct {
     FILE*  log_file;
     uint64_t start_time;
     char   run_name[TL_MAX_NAME];
+    int    global_step;           /**< Global training step counter */
+    float  current_lr;            /**< Current learning rate */
+    float  best_val_loss;         /**< Best validation loss for early stopping */
 } tl_context_t;
 
 void tl_init(tl_context_t* ctx, const tl_train_config_t* train_cfg,

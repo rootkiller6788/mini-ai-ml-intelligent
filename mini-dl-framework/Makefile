@@ -1,60 +1,49 @@
 CC = gcc
-CFLAGS = -std=c99 -Wall -Wextra -O2 -fopenmp
-LDFLAGS = -lm -fopenmp
+CFLAGS = -std=c99 -Wall -Wextra -O2 -Iinclude
+LDFLAGS = -lm
 AR = ar
 ARFLAGS = rcs
 
-SRCDIR = .
+SRCDIR = src
 OBJDIR = obj
 LIBDIR = lib
 BINDIR = bin
+TESTDIR = tests
 
 LIB = $(LIBDIR)/libminidl.a
-DLL = $(LIBDIR)/libminidl.so
 
-SOURCES = autograd.c tensor_ops.c nn_layers.c optimizers.c loss_funcs.c
+SOURCES = autograd.c tensor_ops.c nn_layers.c optimizers.c loss_funcs.c rnn_layers.c training.c
 OBJECTS = $(patsubst %.c,$(OBJDIR)/%.o,$(SOURCES))
 
-EXAMPLES = example_mlp example_convnet example_gan
-DEMOS = demo_mnist demo_transfer_learning
+HEADERS = include/autograd.h include/tensor_ops.h include/nn_layers.h \
+          include/optimizers.h include/loss_funcs.h include/rnn_layers.h \
+          include/training.h
 
-HEADERS = autograd.h tensor_ops.h nn_layers.h optimizers.h loss_funcs.h
+.PHONY: all clean test
 
-.PHONY: all clean demo run examples
-
-all: $(LIB) examples
+all: $(LIB) test
 
 $(OBJDIR):
-	@if not exist "$(OBJDIR)" mkdir "$(OBJDIR)"
+	@mkdir -p "$(OBJDIR)"
 
 $(LIBDIR):
-	@if not exist "$(LIBDIR)" mkdir "$(LIBDIR)"
+	@mkdir -p "$(LIBDIR)"
 
 $(BINDIR):
-	@if not exist "$(BINDIR)" mkdir "$(BINDIR)"
+	@mkdir -p "$(BINDIR)"
 
-$(OBJDIR)/%.o: %.c $(HEADERS) | $(OBJDIR)
+$(OBJDIR)/%.o: $(SRCDIR)/%.c $(HEADERS) | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(LIB): $(OBJECTS) | $(LIBDIR)
 	$(AR) $(ARFLAGS) $@ $(OBJECTS)
 
-examples: $(LIB) $(addprefix $(BINDIR)/,$(EXAMPLES))
-
-$(BINDIR)/example_%: example_%.c $(LIB) | $(BINDIR)
+$(BINDIR)/test_core.exe: $(TESTDIR)/test_core.c $(LIB) | $(BINDIR)
 	$(CC) $(CFLAGS) $< -o $@ -L$(LIBDIR) -lminidl $(LDFLAGS)
 
-demo: $(LIB) $(addprefix $(BINDIR)/,$(DEMOS))
-
-$(BINDIR)/demo_%: demo_%.c $(LIB) | $(BINDIR)
-	$(CC) $(CFLAGS) $< -o $@ -L$(LIBDIR) -lminidl $(LDFLAGS)
-
-run: examples
-	@for %%e in ($(EXAMPLES)) do @(echo === %%e === && $(BINDIR)\%%e.exe)
-
-test: run
+test: $(LIB) $(BINDIR)/test_core.exe
+	@echo "=== Running Tests ==="
+	./$(BINDIR)/test_core.exe
 
 clean:
-	@if exist "$(OBJDIR)" rmdir /s /q "$(OBJDIR)"
-	@if exist "$(LIBDIR)" rmdir /s /q "$(LIBDIR)"
-	@if exist "$(BINDIR)" rmdir /s /q "$(BINDIR)"
+	@rm -rf "$(OBJDIR)" "$(LIBDIR)" "$(BINDIR)"
